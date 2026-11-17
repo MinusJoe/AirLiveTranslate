@@ -2,21 +2,36 @@
 
 日期：2026-11-18（Asia/Tokyo）。角色：需求/实现独立核查 agent。
 
-## 第三版增量审查（进行中）
+## 第三版增量审查
 
 范围：点字幕重播译文、当前未播内容补听、数字/金额/日期/否定表达的规则高亮；继续更新现有 PR，不由本轮核查执行合并。上一轮 34 项 iOS 测试与 Release 编译通过是基线，不能替代本轮新增代码的 CI。
 
-已新增独立 `ReplayAdversarialTests.swift`（8 项）与 `HighlightAdversarialTests.swift`（7 项）。覆盖原语言快照、修订旧项/空白/超长拒绝、补听成功历史、整条预算、Unicode 分块、同一条目不同回放代次、UTF-16/组合 emoji/keycap、否定词边界和金额日期重叠。当前等待本轮真实 CI。
+已新增独立 `ReplayAdversarialTests.swift`（8 项）与 `HighlightAdversarialTests.swift`（7 项）。覆盖原语言快照、修订旧项/空白/超长拒绝、补听成功历史、整条预算、Unicode 分块、同一条目不同回放代次、UTF-16/组合 emoji/keycap、否定词边界和金额日期重叠。
+
+最终代码候选 `6470cf06b9a7f480ad7833fc98dbce18ab248796`，对应 [GitHub Actions run 44159071571](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44159071571)。协调 agent 读取的真实 CI 结果如下：
+
+- Linux：61 个核心测试全部通过。
+- macOS：61 个核心测试全部通过。
+- iOS hosted XCTest：67 个测试、0 失败，`TEST SUCCEEDED`（61 核心 + 6 PCM）。
+- Release 真机架构无签名编译：`BUILD SUCCEEDED`。
+- 可选截图步骤未完成并产生 warning，因此不能宣称本轮界面已经实际点选或完成视觉验收。
+
+第三版最终结论：**Partially verified。** 新增核心回归、iOS 测试和无签名编译均通过，未发现阻断本轮源码交付的已确认缺陷。**回放行为目前只有核心逻辑回归与源码静态检查，没有 AirPods 实际播音、权限切换或路由中断的真机实测。** 本轮更新现有 PR #1，核查不执行合并；签名 IPA、耳机效果、口音收益和声学延迟均不由这些 CI 结果证明。
 
 | ID | 问题 / 核查重点 | 处理与状态 |
 |---|---|---|
-| V3-01 | `needsCatchUp` 最初没有复用播放长度限制，1801 字条目会显示可补听却被计划拒绝。 | 改为先检查 `canReplay`，独立测试保留该边界断言；代码复核完成，待 CI。 |
-| V3-02 | 通用数字规则使用所有 Unicode letter 作边界，漏掉“优惠１５％”等中日文无空格数字。 | 已反馈高亮实现 owner，改为允许 CJK 邻接、仍防止拉丁单词内误匹配；独立测试待 CI。 |
+| V3-01 | `needsCatchUp` 最初没有复用播放长度限制，1801 字条目会显示可补听却被计划拒绝。 | 改为先检查 `canReplay`，独立测试保留该边界断言；代码复核完成，Linux/macOS/iOS 回归通过。 |
+| V3-02 | 通用数字规则使用所有 Unicode letter 作边界，漏掉“优惠１５％”等中日文无空格数字。 | 已改为允许 CJK 邻接、仍防止拉丁单词内误匹配；代码复核完成，Linux/macOS/iOS 独立回归通过。 |
 | V3-03 | 回放不能复用需要麦克风/远场的录播会话。 | 独立 `.playback` + `.spokenAudio`、空 options、无权限请求/输入 tap；输入 UID 和远场校验仅用于实时捕获。代码复核完成。 |
 | V3-04 | 实时转手动重播有旧识别/翻译/播放任务，可能迟到并覆盖补听状态。 | 先同步停止音频、取消实时任务，等待识别清理；ReplayProgress 与底层 generation 保护每个异步边界。回放完成不自动恢复收音。代码复核完成，硬件取消仍待测。 |
 | V3-05 | 改变当前目标语言后重播旧字幕，不能用新语言声音猜读旧译文。 | Caption 保存不可变目标语言，ReplayPlan 捕获该语言；逐条播放前重查 ID/译文/目标语言，单条所有块完成后才记补听成功。 |
 | V3-06 | 首次漏播状态和后续重播结果混为一谈会掩盖失败，或把历史累计数误作当前可补听条数。 | 首次 status、独立 replayStatus、历史 lastReplayAt 分离；后续重播失败不抹掉既往成功。入口按当前 `unheardCaptions` 计算。旧 skippedAudioCount 只计实时跳过/积压，不代表全部中断。 |
 | V3-07 | 组合字符/emoji 中的数字或 UTF-16 偏移可能造成部分字符高亮或越界。 | 返回范围必须同时落在 Swift Character 边界；渲染只修改 AttributedString 样式，不改变 TTS/字幕文本；测试检查重组完全等于原文。 |
+| V3-08 | 补听 sheet 若请求首页宿主的暂停确认，可能发生 presentation 冲突；播放中按钮的辅助标签也不能仍叫“补听”。 | 面板独立承载确认对话框，根只执行已确认动作；关闭面板仅调用带 isReplaying guard 的 stopReplay，停止按钮标签随动作变化。代码复核完成，原生交互待设备检查。 |
+
+最终源码静态复核已完成，暂未发现阻断本轮源码交付的已确认缺陷。长译文按完整 Character 分块、纯空白块跳过合成、每批最多 20 条与 12,000 字符，不使用实时播放的过期淘汰规则。当前待补听条数来自仍在内存中的可播条目，不靠延长历史保留来增加列表。初次/补听状态、成功时间和迟到回调都分别处理，完整播完条目后才从待补听列表移除。
+
+第三版本地独立运行 `verify_project.py`：退出码 0，13 个 Swift 源文件、8 个测试文件、73 个 Xcode 对象的结构检查通过；该检查仍不代表 Swift 编译或耳机行为已验证。
 
 真机新增门槛见 `DEVICE_TEST_PLAN.md` 的 REPLAY/CATCHUP/HIGHLIGHT/UI-REPLAY：重点是麦克风确实关闭、耳机断连不外放、当前播放取消、混合目标语言补听和界面可操作性。高亮是规则提示，不是正确性验证或完整实体识别。
 
