@@ -25,6 +25,16 @@
 			"isa" = "PBXBuildFile";
 			"fileRef" = "6F81D60DFFE39F565F43B001";
 		};
+		"E4549F79C9246F559CA1DA6A" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Sources/App/SettingsView.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"CA8A3FE6F62106BB8717107B" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "E4549F79C9246F559CA1DA6A";
+		};
 		"9493F601C17924F9AFD4841F" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "sourcecode.swift";
@@ -65,6 +75,16 @@
 			"isa" = "PBXBuildFile";
 			"fileRef" = "C8C2690D147019ACAAA46A2D";
 		};
+		"6E6BD3803C2C64387086F0FC" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Sources/Core/StreamingCore.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"60E7015E9046F32B73F08A79" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "6E6BD3803C2C64387086F0FC";
+		};
 		"6C56ADABCAF0C8D0D4E4A9A6" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "sourcecode.swift";
@@ -94,6 +114,26 @@
 		"DF0B12CE2973C3EDB247AEAC" = {
 			"isa" = "PBXBuildFile";
 			"fileRef" = "DDAF0B87D0DABF5AF0F2A914";
+		};
+		"5DD296FCFF6BFF8D4FE95A78" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Tests/StreamingAdversarialTests.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"CA6FCC98C7C0CC2F6DA9FBD0" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "5DD296FCFF6BFF8D4FE95A78";
+		};
+		"A912370A7BF78377A72A55C5" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Tests/StreamingCoreTests.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"42F5B44F30F3291A5A64E31D" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "A912370A7BF78377A72A55C5";
 		};
 		"5F2C0BAFF5ECE16FF3ADD729" = {
 			"isa" = "PBXFileReference";
@@ -149,10 +189,12 @@
 			"children" = (
 				"00EA2BFE88A2C3E255604410",
 				"6F81D60DFFE39F565F43B001",
+				"E4549F79C9246F559CA1DA6A",
 				"9493F601C17924F9AFD4841F",
 				"4F84BB61021F39567A4AF376",
 				"9B8245D18A0E9BD4ED412E12",
 				"C8C2690D147019ACAAA46A2D",
+				"6E6BD3803C2C64387086F0FC",
 				"6C56ADABCAF0C8D0D4E4A9A6",
 			);
 			"name" = "Sources";
@@ -163,6 +205,8 @@
 			"children" = (
 				"99FD325DF8CB4ABDF87EB6B1",
 				"DDAF0B87D0DABF5AF0F2A914",
+				"5DD296FCFF6BFF8D4FE95A78",
+				"A912370A7BF78377A72A55C5",
 			);
 			"name" = "Tests";
 			"sourceTree" = "<group>";
@@ -193,10 +237,12 @@
 			"files" = (
 				"7E8425ACE0C52E825073D6D6",
 				"A2AF292A221C5674D1047ECB",
+				"CA8A3FE6F62106BB8717107B",
 				"1F62CF264A11BB514D3FB7D2",
 				"431301AC372EBC517749CEFB",
 				"B766988D2EEEED196D34C8C8",
 				"4C078E60C703AADC79B296DE",
+				"60E7015E9046F32B73F08A79",
 				"72BF3E051DAFB397017AEFAD",
 			);
 			"runOnlyForDeploymentPostprocessing" = 0;
@@ -223,6 +269,8 @@
 			"files" = (
 				"DBA27BF0165F6ECFE9E9328A",
 				"DF0B12CE2973C3EDB247AEAC",
+				"CA6FCC98C7C0CC2F6DA9FBD0",
+				"42F5B44F30F3291A5A64E31D",
 			);
 			"runOnlyForDeploymentPostprocessing" = 0;
 		};

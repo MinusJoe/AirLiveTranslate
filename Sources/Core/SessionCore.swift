@@ -22,6 +22,51 @@ enum AppLanguage: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+enum SpeechVariant: String, CaseIterable, Identifiable, Sendable {
+    case chineseMainland = "zh-CN"
+    case chineseTaiwan = "zh-TW"
+    case englishUS = "en-US"
+    case englishUK = "en-GB"
+    case englishAustralia = "en-AU"
+    case englishIndia = "en-IN"
+    case japaneseJapan = "ja-JP"
+    var id: String { rawValue }
+    var localeIdentifier: String { rawValue }
+    var language: AppLanguage {
+        switch self {
+        case .chineseMainland, .chineseTaiwan: return .chinese
+        case .japaneseJapan: return .japanese
+        default: return .english
+        }
+    }
+    var name: String {
+        switch self {
+        case .chineseMainland: return "普通话（中国大陆）"
+        case .chineseTaiwan: return "国语（台湾）"
+        case .englishUS: return "英语（美国）"
+        case .englishUK: return "英语（英国）"
+        case .englishAustralia: return "英语（澳大利亚）"
+        case .englishIndia: return "英语（印度）"
+        case .japaneseJapan: return "日语（日本）"
+        }
+    }
+    static func defaultVariant(for language: AppLanguage) -> SpeechVariant {
+        switch language {
+        case .chinese: return .chineseMainland
+        case .english: return .englishUS
+        case .japanese: return .japaneseJapan
+        }
+    }
+    static func supported(for language: AppLanguage, identifiers: [String]) -> [SpeechVariant] {
+        allCases.filter { variant in variant.language == language && identifiers.contains(where: variant.matches) }
+    }
+    func matches(_ identifier: String) -> Bool {
+        let requested = Locale(identifier: rawValue)
+        let actual = Locale(identifier: identifier)
+        return requested.language.languageCode == actual.language.languageCode && requested.region == actual.region
+    }
+}
+
 enum CaptureSource: String, CaseIterable, Identifiable, Sendable {
     case headset, phone
     var id: String { rawValue }
@@ -55,13 +100,16 @@ struct SpeechSegment: Identifiable, Equatable, Sendable {
     let start: Double
     let end: Double
     let receivedAt: Date
+    let committedAtUptime: TimeInterval
 
-    init(text: String, start: Double, end: Double, receivedAt: Date = Date()) {
+    init(text: String, start: Double, end: Double, receivedAt: Date = Date(),
+         committedAtUptime: TimeInterval = ProcessInfo.processInfo.systemUptime) {
         id = UUID()
         self.text = text
         self.start = start
         self.end = end
         self.receivedAt = receivedAt
+        self.committedAtUptime = committedAtUptime
     }
 }
 
@@ -120,6 +168,7 @@ struct SegmentQueue {
     }
 
     mutating func removeAll() { items.removeAll() }
+    mutating func remove(ids: Set<UUID>) { items.removeAll { ids.contains($0.id) } }
 }
 
 enum CaptionStatus: String, Sendable {
@@ -129,6 +178,10 @@ enum CaptionStatus: String, Sendable {
     case complete = "已播报"
     case interrupted = "未播完"
     case failed = "处理失败"
+    case readyToSpeak = "待播报"
+    case unspoken = "仅字幕·未播报"
+    case superseded = "识别已修订"
+    case corrected = "更正字幕·未重播"
 }
 
 struct Caption: Identifiable, Sendable {
@@ -137,6 +190,8 @@ struct Caption: Identifiable, Sendable {
     var translated: String = ""
     var status: CaptionStatus = .waiting
     var processingSeconds: Double?
+    var isProvisional = false
+    var note: String?
 }
 
 /// Real output capability, including system mono mixing, gates one-ear playback.

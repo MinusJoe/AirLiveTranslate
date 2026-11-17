@@ -100,3 +100,35 @@ Retest build / result:
 - [Audio channel routing](https://developer.apple.com/documentation/avfaudio/routing-audio-to-specific-devices-in-multidevice-sessions)
 - [SpeechAnalyzer lifecycle](https://developer.apple.com/documentation/speech/speechanalyzer)
 - [TranslationSession installed resources](https://developer.apple.com/documentation/translation/translationsession/init(installedsource:target:))
+
+## 第二版增量验收：提前提交、快语速、地区变体
+
+第二版的性能改善必须与第一版使用同一录音/同一设备做对照；代码增加计时或队列并行不能单独证明声学延迟下降。以下项目与前面的 P0 用例同时执行。
+
+| 编号 | 操作 / 输入 | 必须观察的结果 |
+|---|---|---|
+| STREAM-01 | 同一段语音多次 partial，最后给相同 final | 已提交前缀不重复播，剩余尾部无漏译；最终原文与所有提交片段对齐 |
+| STREAM-02 | partial 先出现肯定句，后补 not / 不 / ない | 未稳定内容不提前当定论；若已提交内容被修订，明确标记修订，不能悄悄覆盖已播事实 |
+| STREAM-03 | 15→50、3.14、小数/日期/金额/单位、电话号码 | 小数点和缩写不能被误当完整句边界；数字修订必须可见 |
+| STREAM-04 | Dr. Smith、U.S. dollars、e.g.、人名首字母 | 缩写句点不触发无意义短片段，记录实际识别标点对分段的影响 |
+| STREAM-05 | 中文和日语无空格长句，含逗号和句尾否定 | 不按英文空格词数错误切分；不在日语未完成语义前保证正确翻译 |
+| STREAM-06 | partial 被最终结果缩短、重排或替换 | 不能靠字符串长度直接截取尾部导致漏译；修订或回退有明确行为 |
+| STREAM-07 | 同文两次真实讲话、同range重复回调、新range相同text | 回调重复去重，但两次真实讲话保留 |
+| STREAM-08 | 超长无停顿讲话 + 快速不稳定 partial | 队列与稳定性历史均有上限；早提交是可选策略，不以盲切达到延迟指标 |
+| PIPE-01 | 第1段播报较长，第2、3段识别迅速完成 | 后续翻译可在播报期间运行，但译音顺序仍与原讲话一致 |
+| PIPE-02 | 较晚翻译结果先到、某段翻译失败 | 不越过顺序错误播报；失败片段可见，不因后续成功而失去标识 |
+| PIPE-03 | 播放积压超过阈值，选择保字幕策略 | 新字幕/译文继续但跳过播报的条目明确显示；不能把漏播显示成已播报 |
+| PIPE-04 | 保字幕也赶不上识别输入 | 有界处理明确暂停/错误；不能无限增长或静默删除无痕迹 |
+| PIPE-05 | 翻译和播报同时进行时暂停、结束、换语言、耳机断连 | 两条任务链全部失效；迟到结果不复活旧会话 |
+| LOCALE-01 | 选择一个支持的具体英语地区变体 | 显示实际识别 locale；不得使用界面标签冒充真实模型选择 |
+| LOCALE-02 | 请求本机不支持的地区变体 | 清楚显示解析到的地区或要求重新选择，不静默承诺精确匹配 |
+| LOCALE-03 | 标准/快语速/不同地区口音的同一内容 | 逐项比较识别错误率、关键数字/否定错误和声学延迟，不能只测短字幕出现时间 |
+| LOCALE-04 | 切换快结果与稳健识别策略 | 记录实际 reportingOptions 和速度/精度变化，不将 fastResults 描述为保证更准 |
+| UI-01 | 首次进入简洁主页，再进入设置 | 主页能完成主要启动/暂停操作；权限、资源缺失、设备失败仍有可操作入口 |
+| UI-02 | 运行时打开设置 | 语言/引擎/地区变体/声道修改要禁用或先完整停止；布局不能隐藏活动收音状态 |
+
+性能记录增加：首个 partial、稳定前缀提交、final、每段翻译开始/结束、语音排队/开始、修订次数、取消/跳过播报数、最大积压。用户听到的第一次错误译文不能被后来修正的字幕抹去；评价需同时统计首次播报准确率和最终字幕准确率。
+
+识别提示的能力边界：Apple 的 `AnalysisContext.contextualStrings` 文档明确描述 `DictationTranscriber` 的用途，Apple 工程师答复确认 `SpeechTranscriber` 不使用该提示。若实现只使用 SpeechTranscriber，不应把术语输入框或 setContext 调用当成功能已支持。若另行实现 DictationTranscriber，必须针对该路径单独验证资源、地区、速度、取消与准确率。
+
+补充来源：[contextualStrings](https://developer.apple.com/documentation/speech/analysiscontext/contextualstrings)、[Apple 工程师说明](https://developer.apple.com/forums/thread/811083)、[地区回退行为](https://developer.apple.com/documentation/speech/speechtranscriber/supportedlocale(equivalentto:))、[识别 preset 配置](https://developer.apple.com/documentation/speech/speechtranscriber/preset)。

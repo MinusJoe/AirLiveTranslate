@@ -1,0 +1,125 @@
+import AVKit
+import SwiftUI
+
+struct SettingsView: View {
+    @ObservedObject var model: TranslationViewModel
+    @Binding var showOriginal: Bool
+    @Binding var largeCaptions: Bool
+
+    var body: some View {
+        Form {
+            if !model.canConfigure {
+                Text("听译进行中，暂停后可更改语言和耳机设置。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            Section("语言") {
+                Picker("对方的语言", selection: $model.source) {
+                    ForEach(AppLanguage.allCases) { Text($0.name).tag($0) }
+                }.disabled(!model.canConfigure)
+                Picker("翻译成", selection: $model.target) {
+                    ForEach(AppLanguage.allCases) { Text($0.name).tag($0) }
+                }.disabled(!model.canConfigure)
+                if model.availableVariants.isEmpty {
+                    LabeledContent("识别地区", value: "设备未提供可用地区").foregroundStyle(.secondary)
+                } else {
+                    Picker("识别地区", selection: $model.sourceVariant) {
+                        ForEach(model.availableVariants) { Text($0.name).tag($0) }
+                    }.disabled(!model.canConfigure)
+                }
+                Button(model.resourcesReady ? "语言已准备 · 重新检查" : "准备离线语言") { model.requestPreparation() }
+                    .disabled(!model.canConfigure || model.source == model.target)
+                if model.source == model.target {
+                    Text("请选择不同的原文和译文语言。").font(.caption).foregroundStyle(.orange)
+                }
+            }
+            Section {
+                Picker("收音方式", selection: $model.captureSource) {
+                    ForEach(CaptureSource.allCases) { Text($0.name).tag($0) }
+                }.disabled(!model.canConfigure)
+                Picker("译文播放", selection: $model.outputSide) {
+                    Text("双耳").tag(OutputSide.both)
+                    if model.snapshot.output.supportsSingleEar || model.outputSide == .left { Text("左耳").tag(OutputSide.left) }
+                    if model.snapshot.output.supportsSingleEar || model.outputSide == .right { Text("右耳").tag(OutputSide.right) }
+                }.disabled(!model.canConfigure)
+                HStack {
+                    Button("检查耳机") { model.checkAudio() }.disabled(!model.canConfigure)
+                    Spacer()
+                    AudioRoutePicker().frame(width: 38, height: 38).accessibilityLabel("选择系统音频输出")
+                }
+            } header: { Text("耳机") } footer: {
+                Text("单耳选项按实际声道能力开放。固定收音侧请在系统 AirPods 设置中调整，远场模式下的物理麦克风分工仍需实测。")
+            }
+            Section {
+                Toggle("快速响应", isOn: $model.lowLatencyEnabled).disabled(!model.canConfigure)
+                Toggle("播报跟随语速", isOn: $model.adaptiveRateEnabled).disabled(!model.canConfigure)
+            } header: { Text("听译") } footer: {
+                Text("快速响应更早处理稳定短句，可能增加识别修订；关闭后优先稳健并等待最终结果。播报追赶有上限，未播出的内容会保留字幕并标记。")
+            }
+            Section("字幕与声音") {
+                Toggle("显示原文", isOn: $showOriginal)
+                Toggle("大字字幕", isOn: $largeCaptions)
+                HStack {
+                    Text("播报速度")
+                    Slider(value: $model.speakingRate, in: 0.35...0.6).accessibilityLabel("基础播报速度")
+                }.disabled(!model.canConfigure)
+            }
+            Section {
+                DisclosureGroup("设备与处理状态") {
+                    LabeledContent("麦克风权限", value: model.microphonePermission)
+                    LabeledContent("输入", value: model.snapshot.inputName)
+                    LabeledContent("输出", value: model.snapshot.outputName)
+                    LabeledContent("实际识别地区", value: model.actualLocaleIdentifier)
+                    Text(model.isRunning ? "本次启动检测" : "上次检测结果，当前未收音")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text(model.snapshot.detail).font(.caption).foregroundStyle(.secondary)
+                    Text(model.message).font(.footnote)
+                    if model.isRunning {
+                        ProgressView(value: Double(model.inputLevel)) { Text("输入电平").font(.caption) }
+                    }
+                    LabeledContent("等待翻译", value: "\(model.pendingCount) 段")
+                    LabeledContent("等待播报", value: "\(model.pendingSpeechCount) 段")
+                }
+                NavigationLink("使用说明") { usageHelp }
+            }
+            Section {
+                Text("本机处理，不保存录音。暂停保留当前字幕；结束会话时清空。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle("设置")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.visible, for: .navigationBar)
+        .task(id: model.source) { await model.refreshVariants() }
+    }
+
+    private var usageHelp: some View {
+        List {
+            Section("自然讲话，持续听译") {
+                Text("先准备常用语言并检查耳机。首页开始按钮会在首次使用时引导准备资源。请让周围参与者知晓正在收音。")
+                Text("当前需要指定对方语言，尚未实现语音自动判语种。识别地区只列设备实际支持的选项，不代表所有口音都能准确识别。")
+                Text("快速响应依赖稳定片段，仍可能出现修订。否定、数字及长句需要更多上下文，不能保证固定的反应时间。")
+            }
+            Section("声音与字幕") {
+                Text("翻译与播报同时进行。译音跟不上时可能只保留字幕；未播完的内容会有标记。你也可以主动跳到当前讲话。")
+                Text("暂停停止收音和播报；继续只处理新的讲话。耳机断连或系统音频中断后，需要手动恢复。")
+                Text("单耳静音不等于单耳通透。远场效果、译音回采、口音准确率及锁屏连续性需要在你的设备上验证。")
+            }
+            Section("隐私与资源") {
+                Text("录音不落盘，字幕只在当前会话内存中保存最近 200 条。结束后清空。首次准备语言模型需要联网，系统服务可能按 Apple 政策收集使用与性能指标。")
+            }
+        }
+        .navigationTitle("使用说明")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+private struct AudioRoutePicker: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.tintColor = .systemTeal
+        view.activeTintColor = .systemTeal
+        view.prioritizesVideoDevices = false
+        return view
+    }
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+}

@@ -15,8 +15,21 @@ enum SessionState: String {
 
 @MainActor
 final class TranslationViewModel: ObservableObject {
-    @Published var source: AppLanguage = .english { didSet { invalidatePreparation() } }
+    @Published var source: AppLanguage = .english {
+        didSet {
+            guard oldValue != source else { return }
+            sourceVariant = .defaultVariant(for: source)
+            availableVariants = []
+            invalidatePreparation()
+            Task { await refreshVariants() }
+        }
+    }
     @Published var target: AppLanguage = .chinese { didSet { invalidatePreparation() } }
+    @Published var sourceVariant: SpeechVariant = .englishUS { didSet { if oldValue != sourceVariant { invalidatePreparation() } } }
+    @Published private(set) var availableVariants: [SpeechVariant] = []
+    @Published private(set) var actualLocaleIdentifier = "尚未启动"
+    @Published var lowLatencyEnabled = true
+    @Published var adaptiveRateEnabled = true
     @Published var captureSource: CaptureSource = .headset { didSet { snapshot = AudioSnapshot() } }
     @Published var outputSide: OutputSide = .both
     @Published var speakingRate: Double = 0.5
@@ -27,6 +40,9 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var captions: [Caption] = []
     @Published private(set) var draft = ""
     @Published private(set) var pendingCount = 0
+    @Published private(set) var pendingSpeechCount = 0
+    @Published private(set) var skippedAudioCount = 0
+    @Published private(set) var latestMetrics = ProcessingMetrics()
     @Published private(set) var phase = ""
     @Published private(set) var inputLevel: Float = 0
     @Published private(set) var microphonePermission = "未请求"
@@ -37,18 +53,34 @@ final class TranslationViewModel: ObservableObject {
     private let speech = SpeechRecognizer()
     private var epoch = SessionEpoch()
     private var preparationEpoch: UInt64?
-    private var ledger = FinalizationLedger()
-    private var queue = SegmentQueue()
+    private var committer = StreamingCommitter()
+    private var queue = SegmentQueue(capacity: 8, characterLimit: 2400)
+    private var speechQueue = SpeechPlaybackQueue()
+    private var invalidatedIDs: Set<UUID> = []
+    private var subtitleOnlyIDs: Set<UUID> = []
+    private var activeTranslationID: UUID?
+    private var activeSpeechID: UUID?
+    private var speechEpoch = SessionEpoch()
+    private var playbackCutoffUptime: TimeInterval = 0
     private var translator: TranslationSession?
     private var launchTask: Task<Void, Never>?
     private var pipelineTask: Task<Void, Never>?
+    private var speechTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
 
-    var languageKey: String { "\(source.rawValue)>\(target.rawValue)" }
+    var languageKey: String { "\(source.rawValue):\(sourceVariant.rawValue)>\(target.rawValue)" }
     var resourcesReady: Bool { preparedKey == languageKey }
     var isRunning: Bool { state == .listening }
     var isBusy: Bool { [.preparing, .checking, .starting].contains(state) }
     var canConfigure: Bool { !isBusy && !isRunning }
+
+    func refreshVariants() async {
+        let language = source
+        let supported = await SpeechRecognizer.availableVariants(for: language)
+        guard language == source, canConfigure else { return }
+        availableVariants = supported
+        if !supported.contains(sourceVariant), let first = supported.first { sourceVariant = first }
+    }
 
     func requestPreparation() {
         guard canConfigure else { return }
@@ -73,6 +105,7 @@ final class TranslationViewModel: ObservableObject {
     func prepareResources(using session: TranslationSession) async {
         guard let token = preparationEpoch, epoch.accepts(token), state == .preparing else { return }
         let requestedSource = source
+        let requestedVariant = sourceVariant
         let requestedTarget = target
         let requestedKey = languageKey
         guard session.sourceLanguage?.languageCode == Locale.Language(identifier: requestedSource.rawValue).languageCode,
@@ -86,7 +119,8 @@ final class TranslationViewModel: ObservableObject {
             try Task.checkCancellation()
             guard epoch.accepts(token) else { return }
             message = "准备语音识别资源…"
-            try await SpeechRecognizer.installAssets(for: requestedSource)
+            guard requestedVariant.language == requestedSource else { throw PipelineError.message("请选择与源语言匹配的识别地区。") }
+            try await SpeechRecognizer.installAssets(for: requestedVariant)
             try Task.checkCancellation()
             guard epoch.accepts(token) else { return }
             message = "准备翻译资源，请完成系统下载确认。"
@@ -149,15 +183,23 @@ final class TranslationViewModel: ObservableObject {
         guard canConfigure, resourcesReady, source != target, awarenessConfirmed else { return }
         let token = epoch.advance()
         let requestedSource = source
+        let requestedVariant = sourceVariant
+        let requestedLowLatency = lowLatencyEnabled
         let requestedTarget = target
         let requestedCapture = captureSource
         let requestedSide = outputSide
         state = .starting
         message = "正在启动本地识别与耳机音频。"
         draft = ""
-        ledger = FinalizationLedger()
+        committer = StreamingCommitter(lowLatencyEnabled: requestedLowLatency)
         queue.removeAll()
+        _ = speechQueue.removeAll()
+        invalidatedIDs.removeAll()
+        subtitleOnlyIDs.removeAll()
+        playbackCutoffUptime = 0
+        latestMetrics = ProcessingMetrics()
         pendingCount = 0
+        pendingSpeechCount = 0
         let cleanup = cleanupTask
         launchTask = Task { [weak self] in
             guard let self else { return }
@@ -186,7 +228,10 @@ final class TranslationViewModel: ObservableObject {
                 guard self.epoch.accepts(token) else { return }
                 self.translator = TranslationSession(installedSource: Locale.Language(identifier: requestedSource.rawValue),
                                                      target: Locale.Language(identifier: requestedTarget.rawValue))
-                try await self.speech.start(language: requestedSource, audio: { [weak self] in
+                try await self.speech.start(variant: requestedVariant, lowLatency: requestedLowLatency, onLocale: { [weak self] locale in
+                    guard let self, self.epoch.accepts(token) else { return }
+                    self.actualLocaleIdentifier = locale
+                }, audio: { [weak self] in
                     guard let self, self.epoch.accepts(token) else { throw CancellationError() }
                     return try self.audio.start(side: requestedSide, onLevel: { [weak self] level in
                         guard let self, self.epoch.accepts(token) else { return }
@@ -196,9 +241,9 @@ final class TranslationViewModel: ObservableObject {
                         self.stop(reason: reason, failed: true)
                     })
                 }, inputFormat: self.audio.inputFormat,
-                                            onResult: { [weak self] text, final, start, end in
+                                            onResult: { [weak self] update in
                     guard let self, self.epoch.accepts(token) else { return }
-                    self.receive(text: text, final: final, start: start, end: end, token: token)
+                    self.receive(update, token: token)
                 }, onError: { [weak self] error in
                     guard let self, self.epoch.accepts(token) else { return }
                     self.stop(reason: "语音识别停止：\(error.localizedDescription)", failed: true)
@@ -206,7 +251,7 @@ final class TranslationViewModel: ObservableObject {
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
                 self.state = .listening
-                self.phase = "正在听，确定的语义片段会依次翻译播报。"
+                self.phase = requestedLowLatency ? "低延迟听译：稳定完整句可提前提交，修订会明确提示。" : "稳健听译：等待系统最终片段。"
                 self.message = "收音与处理仅在本机进行。已配置锁屏音频，实际连续性待真机验证；来电或路由变化会暂停。"
             } catch {
                 guard self.epoch.accepts(token), !Task.isCancelled else { return }
@@ -224,16 +269,23 @@ final class TranslationViewModel: ObservableObject {
         launchTask = nil
         pipelineTask?.cancel()
         pipelineTask = nil
+        speechEpoch.advance()
+        speechTask?.cancel()
+        speechTask = nil
         translator?.cancel()
         translator = nil
         audio.stop()
         cleanupTask = Task { [speech] in await speech.stop() }
         queue.removeAll()
+        _ = speechQueue.removeAll()
+        activeTranslationID = nil
+        activeSpeechID = nil
         pendingCount = 0
+        pendingSpeechCount = 0
         draft = ""
         phase = ""
         inputLevel = 0
-        for index in captions.indices where [.waiting, .translating, .speaking].contains(captions[index].status) {
+        for index in captions.indices where [.waiting, .translating, .readyToSpeak, .speaking].contains(captions[index].status) {
             captions[index].status = .interrupted
         }
         state = failed ? .failed : (end ? .idle : .paused)
@@ -243,6 +295,7 @@ final class TranslationViewModel: ObservableObject {
     func end() {
         stop(reason: "会话已结束，当前会话字幕已清空。", end: true)
         captions.removeAll()
+        skippedAudioCount = 0
     }
 
     func clearCaptions() {
@@ -258,64 +311,196 @@ final class TranslationViewModel: ObservableObject {
         if isRunning || isBusy { stop(reason: "语言已变化，请重新准备资源。") }
     }
 
-    private func receive(text: String, final: Bool, start: Double, end: Double, token: UInt64) {
+    func skipToLive() {
+        guard isRunning else { return }
+        playbackCutoffUptime = ProcessInfo.processInfo.systemUptime
+        if let activeSpeechID { markUnspoken(activeSpeechID, reason: "用户跳到当前，已中止这段播报。") }
+        for job in speechQueue.removeAll() {
+            if let id = job.captionID { markUnspoken(id, reason: "用户跳到当前，保留字幕但未播报。") }
+        }
+        cancelSpeechWorker()
+        pendingSpeechCount = 0
+        message = "已跳过旧译音。已接收内容继续生成字幕，只播报此后新提交的片段。"
+    }
+
+    private func receive(_ recognition: RecognitionUpdate, token: UInt64) {
         guard epoch.accepts(token) else { return }
-        if !final { draft = text; return }
-        draft = ""
-        guard let segment = ledger.accept(text: text, start: start, end: end) else { return }
-        captions.append(Caption(id: segment.id, original: segment.text))
-        // This screen is intentionally an in-memory rolling transcript, not an archival history.
-        if captions.count > 200 { captions.removeFirst(captions.count - 200) }
+        let batch = committer.process(recognition, now: ProcessInfo.processInfo.systemUptime)
+        draft = batch.draft
+        if !batch.revisedIDs.isEmpty { revoke(batch.revisedIDs, token: token) }
+        for id in batch.confirmedIDs { update(id) { $0.isProvisional = false } }
         do {
-            try queue.append(segment)
+            for committed in batch.segments {
+                let segment = committed.segment
+                var caption = Caption(id: segment.id, original: segment.text)
+                caption.isProvisional = committed.isProvisional
+                if committed.subtitleOnly {
+                    subtitleOnlyIDs.insert(segment.id)
+                    caption.note = "更正：此前识别已变化。此条仅更新字幕，不自动重播整段。"
+                }
+                captions.append(caption)
+                try queue.append(segment)
+            }
+            if captions.count > 200 { captions.removeFirst(captions.count - 200) }
+            trimBookkeeping()
             pendingCount = queue.items.count
-            drain(token: token)
+            drainTranslations(token: token)
         } catch {
             stop(reason: error.localizedDescription, failed: true)
         }
     }
 
-    private func drain(token: UInt64) {
+    private func revoke(_ ids: [UUID], token: UInt64) {
+        let revised = Set(ids)
+        invalidatedIDs.formUnion(revised)
+        queue.remove(ids: revised)
+        _ = speechQueue.remove(captionIDs: revised)
+        for id in ids {
+            update(id) {
+                $0.status = .superseded
+                $0.isProvisional = false
+                $0.note = "后续识别修订了这段原文，旧译文不再可靠；请查看更正字幕。"
+            }
+        }
+        if let activeSpeechID, revised.contains(activeSpeechID) { cancelSpeechWorker() }
+        let notice: String
+        switch target {
+        case .chinese: notice = "刚才的识别有修正，请查看字幕。"
+        case .english: notice = "An earlier transcript was corrected. Please check the screen."
+        case .japanese: notice = "先ほどの認識が修正されました。字幕を確認してください。"
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+        enqueueSpeech(SpeechJob(id: UUID(), captionID: nil, text: notice, committedAtUptime: now,
+                               queuedAtUptime: now, estimatedSeconds: SpeechPacing.estimatedDuration(text: notice, language: target)), token: token)
+        message = "识别修订了提前提交的内容：旧待播已撤销，最终更正仅保留字幕，不重复播整段。"
+        pendingCount = queue.items.count
+    }
+
+    /// This worker never waits for TTS playback; translations remain ordered while speech drains separately.
+    private func drainTranslations(token: UInt64) {
         guard pipelineTask == nil else { return }
         pipelineTask = Task { [weak self] in
             guard let self else { return }
-            var activeSegmentID: UUID?
             do {
                 while self.epoch.accepts(token), let segment = try self.queue.pop() {
-                    activeSegmentID = segment.id
                     try Task.checkCancellation()
+                    guard !self.invalidatedIDs.contains(segment.id) else { continue }
+                    self.activeTranslationID = segment.id
                     self.pendingCount = self.queue.items.count
                     guard let translator = self.translator else { throw CancellationError() }
-                    self.phase = "正在翻译"
+                    self.phase = "正在识别与翻译，译音独立播放"
                     self.update(segment.id) { $0.status = .translating }
+                    let began = ProcessInfo.processInfo.systemUptime
                     let response = try await translator.translate(segment.text)
                     try Task.checkCancellation()
                     guard self.epoch.accepts(token) else { return }
+                    guard !self.invalidatedIDs.contains(segment.id) else {
+                        self.activeTranslationID = nil
+                        continue
+                    }
                     let text = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { throw PipelineError.message("翻译未返回内容，已暂停。") }
-                    guard Date().timeIntervalSince(segment.receivedAt) <= 20 else { throw PipelineError.staleSegment }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    self.latestMetrics.translationSeconds = now - began
                     self.update(segment.id) {
                         $0.translated = text
-                        $0.status = .speaking
-                        // Measures finalized-text-to-TTS-request processing, not acoustic latency.
-                        $0.processingSeconds = Date().timeIntervalSince(segment.receivedAt)
+                        $0.processingSeconds = now - segment.committedAtUptime
                     }
-                    self.phase = "正在播报，同时继续收音"
-                    try await self.audio.speak(text, language: self.target, rate: Float(self.speakingRate))
-                    try Task.checkCancellation()
-                    guard self.epoch.accepts(token) else { return }
-                    self.update(segment.id) { $0.status = .complete }
-                    activeSegmentID = nil
+                    if self.subtitleOnlyIDs.contains(segment.id) {
+                        self.update(segment.id) { $0.status = .corrected }
+                    } else if segment.committedAtUptime < self.playbackCutoffUptime || now - segment.committedAtUptime > 15 {
+                        self.markUnspoken(segment.id, reason: "译文已过时或已跳到当前，仅保留字幕。")
+                    } else {
+                        self.update(segment.id) { $0.status = .readyToSpeak }
+                        self.enqueueSpeech(SpeechJob(id: UUID(), captionID: segment.id, text: text,
+                                                     committedAtUptime: segment.committedAtUptime, queuedAtUptime: now,
+                                                     estimatedSeconds: SpeechPacing.estimatedDuration(text: text, language: self.target)), token: token)
+                    }
+                    self.activeTranslationID = nil
                 }
                 guard self.epoch.accepts(token) else { return }
                 self.pipelineTask = nil
-                self.phase = "正在听，等待下一个确定片段。"
+                self.phase = self.speechTask == nil ? "正在听，等待下一个片段。" : "正在听译，继续播报"
             } catch {
                 guard self.epoch.accepts(token), !Task.isCancelled else { return }
-                if let activeSegmentID { self.update(activeSegmentID) { $0.status = .failed } }
+                if let id = self.activeTranslationID { self.update(id) { $0.status = .failed } }
                 self.stop(reason: error.localizedDescription, failed: true)
             }
         }
+    }
+
+    private func enqueueSpeech(_ job: SpeechJob, token: UInt64) {
+        for omitted in speechQueue.append(job) {
+            if let id = omitted.captionID { markUnspoken(id, reason: "播报积压超过上限，仅保留字幕。") }
+        }
+        pendingSpeechCount = speechQueue.items.count
+        drainSpeech(token: token)
+    }
+
+    private func drainSpeech(token: UInt64) {
+        guard speechTask == nil else { return }
+        let playbackToken = speechEpoch.advance()
+        speechTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                while self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken), let job = self.speechQueue.pop() {
+                    try Task.checkCancellation()
+                    self.pendingSpeechCount = self.speechQueue.items.count
+                    if let id = job.captionID, self.invalidatedIDs.contains(id) { continue }
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if job.committedAtUptime < self.playbackCutoffUptime || now - job.committedAtUptime > 15 {
+                        if let id = job.captionID { self.markUnspoken(id, reason: "译音已过时，仅保留字幕。") }
+                        continue
+                    }
+                    self.activeSpeechID = job.captionID
+                    if let id = job.captionID { self.update(id) { $0.status = .speaking } }
+                    self.latestMetrics.playbackQueueSeconds = now - job.queuedAtUptime
+                    let rate = SpeechPacing.rate(base: Float(self.speakingRate), queuedSeconds: self.speechQueue.estimatedDuration,
+                                                 adaptive: self.adaptiveRateEnabled)
+                    try await self.audio.speak(job.text, language: self.target, rate: rate, onFirstBufferScheduled: { [weak self] in
+                        guard let self, self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
+                        self.latestMetrics.firstBufferScheduledSeconds = ProcessInfo.processInfo.systemUptime - job.committedAtUptime
+                    })
+                    try Task.checkCancellation()
+                    guard self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
+                    if let id = job.captionID { self.update(id) { $0.status = .complete } }
+                    self.activeSpeechID = nil
+                }
+                guard self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
+                self.speechTask = nil
+                self.activeSpeechID = nil
+                self.phase = self.pipelineTask == nil ? "正在听，等待下一个片段。" : "正在识别与翻译"
+            } catch {
+                guard self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken), !Task.isCancelled else { return }
+                if let id = self.activeSpeechID { self.update(id) { $0.status = .failed } }
+                self.stop(reason: error.localizedDescription, failed: true)
+            }
+        }
+    }
+
+    private func cancelSpeechWorker() {
+        speechEpoch.advance()
+        speechTask?.cancel()
+        speechTask = nil
+        audio.stopSpeech()
+        activeSpeechID = nil
+    }
+
+    private func markUnspoken(_ id: UUID, reason: String) {
+        guard let index = captions.firstIndex(where: { $0.id == id }),
+              captions[index].status != .unspoken, captions[index].status != .superseded else { return }
+        captions[index].status = .unspoken
+        captions[index].note = reason
+        skippedAudioCount += 1
+        message = "播报未能覆盖全部内容：累计 \(skippedAudioCount) 段未完整播报，字幕已保留。"
+    }
+
+    private func trimBookkeeping() {
+        var live = Set(captions.map(\.id))
+        if let activeTranslationID { live.insert(activeTranslationID) }
+        if let activeSpeechID { live.insert(activeSpeechID) }
+        invalidatedIDs.formIntersection(live)
+        subtitleOnlyIDs.formIntersection(live)
     }
 
     private func update(_ id: UUID, mutate: (inout Caption) -> Void) {

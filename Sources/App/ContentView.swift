@@ -1,253 +1,235 @@
-import AVKit
 import SwiftUI
 import Translation
 
 struct ContentView: View {
     @StateObject private var model = TranslationViewModel()
-    @State private var showHelp = false
+    @State private var showSettings = false
+    @State private var showOriginal = true
+    @State private var largeCaptions = false
+    @State private var askAwareness = false
+    @State private var askSkip = false
+    @State private var startAfterPreparation = false
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    statusCard
-                    settingsCard
-                    controls
-                    transcript
-                }
-                .padding()
+            VStack(spacing: 0) {
+                header
+                if model.isBusy || model.state == .failed { statusNotice }
+                transcript
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("耳边译")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showHelp = true } label: { Image(systemName: "questionmark.circle") }
-                        .accessibilityLabel("佩戴与使用说明")
-                }
+            .background(Color(.systemBackground))
+            .safeAreaInset(edge: .bottom, spacing: 0) { controls }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(isPresented: $showSettings) {
+                SettingsView(model: model, showOriginal: $showOriginal, largeCaptions: $largeCaptions)
             }
-            .sheet(isPresented: $showHelp) { helpSheet }
             .translationTask(model.translationConfiguration) { session in
                 await model.prepareResources(using: session)
+            }
+            .task { await model.refreshVariants() }
+            .onChange(of: model.resourcesReady) { _, ready in
+                if ready { continueAfterPreparationIfReady() }
+            }
+            .onChange(of: model.state) { _, state in
+                if state == .failed || state == .paused { startAfterPreparation = false }
+                else if state == .idle { continueAfterPreparationIfReady() }
+            }
+            .confirmationDialog("开始前，请让周围参与者知晓正在进行语音翻译。", isPresented: $askAwareness, titleVisibility: .visible) {
+                Button("已告知，开始听译") {
+                    model.awarenessConfirmed = true
+                    begin()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("在设备端处理，不保存录音；结束会话时清空字幕。")
+            }
+            .confirmationDialog("跳到当前讲话？", isPresented: $askSkip, titleVisibility: .visible) {
+                Button("跳到当前") { model.skipToLive() }
+                Button("继续按顺序听", role: .cancel) {}
+            } message: {
+                Text("停止当前及等待中的旧译音，相关字幕会标记未播完。")
             }
         }
         .tint(.teal)
     }
 
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private var header: some View {
+        VStack(spacing: 16) {
             HStack {
-                Image(systemName: model.isRunning ? "waveform" : "earbuds")
-                    .font(.title2)
-                    .foregroundStyle(.teal)
-                Text(model.state.rawValue).font(.headline)
+                Text("耳边译").font(.system(size: 27, weight: .semibold))
                 Spacer()
-                Text("设备端处理").font(.caption).foregroundStyle(.secondary)
-            }
-            Text(model.message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
-            if !model.phase.isEmpty {
-                Text(model.phase).font(.caption).foregroundStyle(.secondary)
-            }
-            if model.pendingCount > 0 {
-                Text("等待处理：\(model.pendingCount) 个片段").font(.caption).foregroundStyle(.orange)
-            }
-            if model.isRunning {
-                Label("麦克风正在使用", systemImage: "mic.fill").font(.caption).foregroundStyle(.orange)
-                ProgressView(value: Double(model.inputLevel))
-                    .tint(.teal)
-                    .accessibilityLabel("麦克风输入电平")
-                    .accessibilityValue("\(Int(model.inputLevel * 100))%")
-            }
-        }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 20))
-    }
-
-    private var settingsCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                languagePicker("对方说", selection: $model.source)
-                Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                languagePicker("我听", selection: $model.target)
-            }
-            .disabled(!model.canConfigure)
-
-            Button(model.resourcesReady ? "语言已准备 · 重新检查" : "准备语言资源") { model.requestPreparation() }
-                .buttonStyle(.bordered)
-                .disabled(!model.canConfigure || model.source == model.target)
-
-            Divider()
-            Picker("收音", selection: $model.captureSource) {
-                ForEach(CaptureSource.allCases) { Text($0.name).tag($0) }
-            }
-            .disabled(!model.canConfigure)
-            HStack {
-                Button("检查音频") { model.checkAudio() }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.canConfigure)
-                Spacer()
-                Text("系统输出").font(.caption).foregroundStyle(.secondary)
-                AudioRoutePicker().frame(width: 36, height: 36)
-                    .accessibilityLabel("选择系统音频输出")
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(model.isRunning ? "本次启动检查结果" : "上次检查结果（当前未收音）")
-                    .fontWeight(.medium)
-                Text("麦克风权限：\(model.microphonePermission)")
-                Text("输入：\(model.snapshot.inputName)")
-                Text("输出：\(model.snapshot.outputName)")
-                if model.captureSource == .headset {
-                    Text("远场：\(model.snapshot.hasBeenChecked ? (model.snapshot.farFieldSupported ? "支持" : "不支持") : "尚未检测") · 检查时启用：\(model.snapshot.farFieldEnabled ? "是" : "否")")
+                Button { showSettings = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 18, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .background(Color(.secondarySystemBackground), in: Circle())
                 }
-                Text(model.snapshot.detail)
+                .foregroundStyle(.primary)
+                .accessibilityLabel("打开设置")
+            }
+            HStack(spacing: 8) {
+                Text("\(model.source.name) → \(model.target.name)").foregroundStyle(.teal)
+                Spacer(minLength: 4)
+                Label(model.isRunning ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
+                    .foregroundStyle(.secondary)
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
-
-            Text("译文播放").font(.subheadline)
-            HStack {
-                ForEach(OutputSide.allCases) { side in
-                    Button {
-                        model.outputSide = side
-                    } label: {
-                        HStack(spacing: 4) {
-                            if model.outputSide == side { Image(systemName: "checkmark") }
-                            Text(side.name)
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.canConfigure || (side != .both && !model.snapshot.output.supportsSingleEar))
-                    .accessibilityAddTraits(model.outputSide == side ? [.isSelected] : [])
-                }
-            }
-            Text("单耳选项仅在实际路由提供独立左右声道时开放。固定收音侧请到 AirPods 系统设置操作；远场模式的物理麦克风分工无法保证。")
-                .font(.caption).foregroundStyle(.secondary)
-
-            HStack {
-                Text("播报速度").font(.subheadline)
-                Slider(value: $model.speakingRate, in: 0.35...0.6)
-                    .accessibilityLabel("播报速度")
-            }
-            .disabled(!model.canConfigure)
-            Toggle("周围参与者已知晓正在进行语音翻译", isOn: $model.awarenessConfirmed)
-                .font(.caption)
-                .disabled(!model.canConfigure)
+            Divider()
         }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 20))
+        .padding(.horizontal, 24)
+        .padding(.top, 12)
     }
 
-    private func languagePicker(_ title: String, selection: Binding<AppLanguage>) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Picker(title, selection: selection) {
-                ForEach(AppLanguage.allCases) { Text($0.name).tag($0) }
+    private var statusNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if model.isBusy { ProgressView().controlSize(.small) }
+            else { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                if model.state == .failed {
+                    Button("查看设置") { showSettings = true }.font(.caption)
+                }
             }
-            .labelsHidden()
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+    }
+
+    private var transcript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    if model.captions.isEmpty && model.draft.isEmpty {
+                        emptyState
+                    } else {
+                        Text("实时字幕").font(.caption).foregroundStyle(.secondary)
+                        ForEach(model.captions) { caption in
+                            captionView(caption, latest: caption.id == model.captions.last?.id).id(caption.id)
+                        }
+                        if !model.draft.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("识别中 · 文字可能修订").font(.caption2).foregroundStyle(.secondary)
+                                if showOriginal { Text(model.draft).font(.subheadline).foregroundStyle(.secondary) }
+                            }
+                        }
+                    }
+                    Color.clear.frame(height: 1).id("transcript-bottom")
+                }
+                .padding(.horizontal, 24)
+                .padding(.vertical, 27)
+            }
+            .onChange(of: model.captions.count) { _, _ in proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+            .onChange(of: model.captions.last?.translated) { _, _ in proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "waveform").font(.system(size: 34)).foregroundStyle(.teal)
+            Text(model.isRunning ? "正在听，请自然讲话" : "听懂，就从这里开始").font(.title3).fontWeight(.medium)
+            Text(model.isRunning ? "原文与译文会显示在这里" : "戴好耳机，轻点开始")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 90)
+    }
+
+    private func captionView(_ caption: Caption, latest: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if latest || caption.status != .complete {
+                Text(caption.status.rawValue).font(.caption2).foregroundStyle(.secondary)
+            }
+            Text(caption.translated.isEmpty ? "正在组织译文…" : caption.translated)
+                .font(.system(size: latest ? (largeCaptions ? 32 : 27) : (largeCaptions ? 23 : 19), weight: latest ? .medium : .regular))
+                .foregroundStyle(latest ? Color.primary : Color.secondary)
+                .lineSpacing(latest ? 6 : 4)
+                .textSelection(.enabled)
+            if showOriginal {
+                Text(caption.original).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if caption.isProvisional {
+                Text("提前译出 · 可能修订").font(.caption2).foregroundStyle(.orange)
+            }
+            if let note = caption.note, !note.isEmpty {
+                Text(note).font(.caption).foregroundStyle(.orange)
+            }
+            if !latest { Divider().padding(.top, 14) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var controls: some View {
-        HStack(spacing: 12) {
-            if model.isRunning || model.isBusy {
-                Button { model.stop() } label: {
-                    Label(model.isBusy ? "取消" : "暂停", systemImage: "pause.fill")
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+        VStack(spacing: 14) {
+            if model.pendingSpeechCount > 2 || model.skippedAudioCount > 0 {
+                HStack {
+                    Text(model.skippedAudioCount > 0 ? "\(model.skippedAudioCount) 段仅字幕 / 未播完" : "译音正在追赶")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if model.isRunning { Button("跳到当前") { askSkip = true }.font(.caption) }
                 }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Button { model.start() } label: {
-                    Label(model.state == .paused ? "恢复听译" : "开始听译", systemImage: "play.fill")
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+            }
+            HStack(spacing: 7) {
+                Image(systemName: model.isRunning ? "waveform" : "pause.circle")
+                    .foregroundStyle(model.isRunning ? Color.teal : Color.secondary)
+                Text(model.isRunning ? "正在听译" : model.state.rawValue).font(.caption).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 12) {
+                Button {
+                    if model.isRunning || model.isBusy {
+                        startAfterPreparation = false
+                        model.stop()
+                    } else if !model.awarenessConfirmed {
+                        askAwareness = true
+                    } else { begin() }
+                } label: {
+                    Label(primaryTitle, systemImage: model.isRunning || model.isBusy ? "pause.fill" : "play.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                        .background(Color.teal, in: RoundedRectangle(cornerRadius: 20))
+                        .foregroundStyle(.white)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.resourcesReady || !model.awarenessConfirmed || model.source == model.target)
-            }
-            Button("结束") { model.end() }.buttonStyle(.bordered)
-                .disabled(model.state == .idle && model.captions.isEmpty)
-        }
-    }
-
-    private var transcript: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("实时字幕").font(.headline)
-                Spacer()
-                Button("清空") { model.clearCaptions() }.font(.caption)
-                    .disabled(!model.canConfigure || model.captions.isEmpty)
-            }
-            Text("仅保留内存中最近 200 条。未确定文字会更新，确定后才翻译播报。")
-                .font(.caption).foregroundStyle(.secondary)
-            if !model.draft.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("识别中 · 尚未播报").font(.caption).foregroundStyle(.secondary)
-                    Text(model.draft).foregroundStyle(.secondary)
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
-            }
-            if model.captions.isEmpty && model.draft.isEmpty {
-                ContentUnavailableView("等待讲话", systemImage: "text.bubble",
-                                       description: Text("开始后，对方的原文和译文会出现在这里。"))
-            }
-            ForEach(model.captions.reversed()) { caption in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(caption.translated.isEmpty ? "等待译文…" : caption.translated)
-                        .font(.title3).fontWeight(.medium)
-                    Text(caption.original).font(.subheadline).foregroundStyle(.secondary)
-                    HStack {
-                        Text(caption.status.rawValue)
-                        Spacer()
-                        if let seconds = caption.processingSeconds {
-                            Text("文本处理 \(seconds, specifier: "%.1f") 秒")
-                        }
+                .buttonStyle(.plain)
+                if model.isRunning || model.isBusy || !model.captions.isEmpty {
+                    Button {
+                        startAfterPreparation = false
+                        model.end()
+                    } label: {
+                        Text("结束").font(.subheadline)
+                            .frame(width: 58, height: 60)
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 19))
+                            .foregroundStyle(.secondary)
                     }
-                    .font(.caption2).foregroundStyle(.secondary)
+                    .buttonStyle(.plain)
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
             }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+        .padding(.bottom, 16)
+        .background(Color(.systemBackground))
+    }
+
+    private var primaryTitle: String {
+        if model.isBusy { return "取消准备" }
+        if model.isRunning { return "暂停听译" }
+        return model.state == .paused ? "继续听译" : "开始听译"
+    }
+
+    private func begin() {
+        guard model.source != model.target else { showSettings = true; return }
+        if model.resourcesReady { model.start() }
+        else {
+            startAfterPreparation = true
+            model.requestPreparation()
         }
     }
 
-    private var helpSheet: some View {
-        NavigationStack {
-            List {
-                Section("双耳佩戴") {
-                    Text("连接同一副 AirPods，双方知情后开始。先测试约 1 米处单人讲话，再测试远距离和噪声。")
-                    Text("耳机远场收音需要 iOS 26.2+ 且耳机路由实际支持。iOS 26.0/26.1 可主动选择手机麦克风。")
-                    Text("如需固定左或右麦克风，请打开系统设置 → AirPods → 麦克风。此 App 无法直接控制左右物理麦克风，也无法保证该设置在远场处理中如何生效。")
-                }
-                Section("播放与连续听译") {
-                    Text("单耳播放依赖实际左右声道。关闭系统单声道音频后重新检查；无法确认时请主动选双耳。单耳不播放译文并不等于该耳自动处于通透模式。")
-                    Text("本版本按系统确定的语义片段连续翻译。长句可能等待更久，并非零延迟同声传译。多人重叠讲话和译文串音需要真机评估。")
-                    Text("暂停会丢弃尚未播完的音频，并把对应字幕标为未播完；结束会清空字幕。恢复只处理新的讲话。来电或耳机变化后需要手动恢复。")
-                }
-                Section("数据") {
-                    Text("音频、识别、翻译与合成在设备端处理；本 App 不保存录音，不上传对话，不将字幕写入文件。语言模型首次下载需要联网。")
-                    Text("字幕仅保留内存中最近 200 条。暂停会保留字幕；结束会话、清空或结束 App 进程后无法恢复。系统语言服务可能按 Apple 的政策收集使用与性能指标。")
-                }
-                Section("版本状态") {
-                    Text("实验 MVP。设备能力检测不是远场效果或单耳物理听感的验收证明，请按项目验收清单测试。")
-                }
-            }
-            .navigationTitle("使用说明")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showHelp = false } } }
-        }
+    private func continueAfterPreparationIfReady() {
+        guard startAfterPreparation, model.resourcesReady, model.state == .idle else { return }
+        startAfterPreparation = false
+        model.start()
     }
-}
-
-private struct AudioRoutePicker: UIViewRepresentable {
-    func makeUIView(context: Context) -> AVRoutePickerView {
-        let view = AVRoutePickerView()
-        view.tintColor = .systemTeal
-        view.activeTintColor = .systemTeal
-        view.prioritizesVideoDevices = false
-        return view
-    }
-    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

@@ -152,7 +152,8 @@ final class AudioController {
         return pair.stream
     }
 
-    func speak(_ text: String, language: AppLanguage, rate: Float) async throws {
+    func speak(_ text: String, language: AppLanguage, rate: Float,
+               onFirstBufferScheduled: (@MainActor () -> Void)? = nil) async throws {
         try Task.checkCancellation()
         guard let playbackFormat else { throw PipelineError.message("音频尚未启动。") }
         try validateRoute()
@@ -170,7 +171,7 @@ final class AudioController {
         synthesisContinuation = pair.continuation
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
-        utterance.rate = min(max(rate, 0.35), 0.6)
+        utterance.rate = min(max(rate, 0.35), 0.65)
         synthesizer.write(utterance) { buffer in
             guard let pcm = buffer as? AVAudioPCMBuffer else {
                 pair.continuation.finish(throwing: PipelineError.message("系统语音返回了不支持的音频格式。"))
@@ -194,6 +195,7 @@ final class AudioController {
                 try validateRoute()
                 guard let converted = try converter.convert(pcm) else { continue }
                 try PCMUtilities.isolate(converted, side: selectedSide)
+                if !emitted { onFirstBufferScheduled?() }
                 emitted = true
                 schedule(converted, completion: completions.continuation)
                 scheduledCount += 1
@@ -207,6 +209,7 @@ final class AudioController {
                 guard playbackGeneration == token else { throw CancellationError() }
                 try validateRoute()
                 try PCMUtilities.isolate(tail, side: selectedSide)
+                if !emitted { onFirstBufferScheduled?() }
                 emitted = true
                 schedule(tail, completion: completions.continuation)
                 scheduledCount += 1

@@ -5,9 +5,9 @@ import hashlib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-ALLOWED_TOP = {'Sources', 'Tests', 'Resources', 'scripts', 'docs', 'AirPodsTranslator.xcodeproj'}
+ALLOWED_TOP = {'Sources', 'Tests', 'Resources', 'scripts', 'docs', 'evaluation', '.github', 'AirPodsTranslator.xcodeproj'}
 ALLOWED_FILES = {'README.md', 'LICENSE', 'Package.swift', 'codemagic.yaml', '.gitignore', '.gitattributes'}
-ALLOWED_EXTENSIONS = {'.swift', '.py', '.sh', '.md', '.plist', '.xcprivacy', '.png', '.json', '.pbxproj', '.xcscheme'}
+ALLOWED_EXTENSIONS = {'.swift', '.py', '.sh', '.md', '.plist', '.xcprivacy', '.png', '.json', '.jsonl', '.csv', '.yml', '.yaml', '.pbxproj', '.xcscheme'}
 
 
 def main():
