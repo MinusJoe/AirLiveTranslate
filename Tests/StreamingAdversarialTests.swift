@@ -171,5 +171,6 @@ final class StreamingAdversarialTests: XCTestCase {
         XCTAssertLessThanOrEqual(queue.items.count, 2)
         XCTAssertTrue(queue.items.contains { $0.captionID == nil },
                       "A lock-screen listener must still hear that earlier speech was corrected")
+        XCTAssertNil(queue.pop()?.captionID, "The correction notice should precede queued ordinary speech")
     }
 }

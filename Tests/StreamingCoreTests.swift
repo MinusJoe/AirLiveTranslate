@@ -94,4 +94,16 @@ final class StreamingCoreTests: XCTestCase {
         XCTAssertTrue(SpeechVariant.chineseTaiwan.matches("zh_Hant_TW"))
         XCTAssertFalse(SpeechVariant.chineseTaiwan.matches("zh-Hans-CN"))
     }
+
+    func testRollingCaptionsKeepActiveJobsSoSkipCanRecordTheirOmission() {
+        var captions = (0..<205).map { Caption(id: UUID(), original: "line \($0)") }
+        let speaking = captions[0].id
+        let translating = captions[1].id
+        let oldestInactive = captions[2].id
+        CaptionRetention.trim(&captions, protecting: [speaking, translating])
+        XCTAssertEqual(captions.count, 200)
+        XCTAssertTrue(captions.contains { $0.id == speaking })
+        XCTAssertTrue(captions.contains { $0.id == translating })
+        XCTAssertFalse(captions.contains { $0.id == oldestInactive })
+    }
 }

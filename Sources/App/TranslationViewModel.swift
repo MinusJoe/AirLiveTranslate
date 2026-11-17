@@ -58,6 +58,7 @@ final class TranslationViewModel: ObservableObject {
     private var speechQueue = SpeechPlaybackQueue()
     private var invalidatedIDs: Set<UUID> = []
     private var subtitleOnlyIDs: Set<UUID> = []
+    private var scheduledAudioIDs: Set<UUID> = []
     private var activeTranslationID: UUID?
     private var activeSpeechID: UUID?
     private var speechEpoch = SessionEpoch()
@@ -196,6 +197,7 @@ final class TranslationViewModel: ObservableObject {
         _ = speechQueue.removeAll()
         invalidatedIDs.removeAll()
         subtitleOnlyIDs.removeAll()
+        scheduledAudioIDs.removeAll()
         playbackCutoffUptime = 0
         latestMetrics = ProcessingMetrics()
         pendingCount = 0
@@ -325,6 +327,10 @@ final class TranslationViewModel: ObservableObject {
 
     private func receive(_ recognition: RecognitionUpdate, token: UInt64) {
         guard epoch.accepts(token) else { return }
+        guard recognition.text.count <= 12_000 else {
+            stop(reason: "识别片段过长，已暂停以限制内存。请稍后重新开始。", failed: true)
+            return
+        }
         let batch = committer.process(recognition, now: ProcessInfo.processInfo.systemUptime)
         draft = batch.draft
         if !batch.revisedIDs.isEmpty { revoke(batch.revisedIDs, token: token) }
@@ -334,24 +340,28 @@ final class TranslationViewModel: ObservableObject {
                 let segment = committed.segment
                 var caption = Caption(id: segment.id, original: segment.text)
                 caption.isProvisional = committed.isProvisional
-                if committed.subtitleOnly {
+                if committed.subtitleOnly && committed.replacesIDs.contains(where: scheduledAudioIDs.contains) {
                     subtitleOnlyIDs.insert(segment.id)
                     caption.note = "更正：此前识别已变化。此条仅更新字幕，不自动重播整段。"
+                } else if committed.subtitleOnly {
+                    caption.note = "识别已更正。旧译音尚未开始，已撤销；将播报这条更正后的内容。"
                 }
                 captions.append(caption)
                 try queue.append(segment)
             }
-            if captions.count > 200 { captions.removeFirst(captions.count - 200) }
+            trimCaptions()
             trimBookkeeping()
             pendingCount = queue.items.count
             drainTranslations(token: token)
         } catch {
+            trimCaptions()
             stop(reason: error.localizedDescription, failed: true)
         }
     }
 
     private func revoke(_ ids: [UUID], token: UInt64) {
         let revised = Set(ids)
+        let hadScheduledAudio = ids.contains(where: scheduledAudioIDs.contains)
         invalidatedIDs.formUnion(revised)
         queue.remove(ids: revised)
         _ = speechQueue.remove(captionIDs: revised)
@@ -363,16 +373,21 @@ final class TranslationViewModel: ObservableObject {
             }
         }
         if let activeSpeechID, revised.contains(activeSpeechID) { cancelSpeechWorker() }
-        let notice: String
-        switch target {
-        case .chinese: notice = "刚才的识别有修正，请查看字幕。"
-        case .english: notice = "An earlier transcript was corrected. Please check the screen."
-        case .japanese: notice = "先ほどの認識が修正されました。字幕を確認してください。"
+        if hadScheduledAudio {
+            let notice: String
+            switch target {
+            case .chinese: notice = "刚才的识别有修正，请查看字幕。"
+            case .english: notice = "An earlier transcript was corrected. Please check the screen."
+            case .japanese: notice = "先ほどの認識が修正されました。字幕を確認してください。"
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            enqueueSpeech(SpeechJob(id: UUID(), captionID: nil, text: notice, committedAtUptime: now,
+                                   queuedAtUptime: now, estimatedSeconds: SpeechPacing.estimatedDuration(text: notice, language: target)), token: token)
+        } else {
+            drainSpeech(token: token)
         }
-        let now = ProcessInfo.processInfo.systemUptime
-        enqueueSpeech(SpeechJob(id: UUID(), captionID: nil, text: notice, committedAtUptime: now,
-                               queuedAtUptime: now, estimatedSeconds: SpeechPacing.estimatedDuration(text: notice, language: target)), token: token)
-        message = "识别修订了提前提交的内容：旧待播已撤销，最终更正仅保留字幕，不重复播整段。"
+        message = hadScheduledAudio ? "识别修订了提前播报的内容：已发出更正提示，最终更正仅保留字幕，不重复播整段。"
+                                    : "识别已修订：尚未开始的旧译音已撤销，将只播放更正后的内容。"
         pendingCount = queue.items.count
     }
 
@@ -448,7 +463,7 @@ final class TranslationViewModel: ObservableObject {
                     self.pendingSpeechCount = self.speechQueue.items.count
                     if let id = job.captionID, self.invalidatedIDs.contains(id) { continue }
                     let now = ProcessInfo.processInfo.systemUptime
-                    if job.committedAtUptime < self.playbackCutoffUptime || now - job.committedAtUptime > 15 {
+                    if job.captionID != nil && (job.committedAtUptime < self.playbackCutoffUptime || now - job.committedAtUptime > 15) {
                         if let id = job.captionID { self.markUnspoken(id, reason: "译音已过时，仅保留字幕。") }
                         continue
                     }
@@ -459,6 +474,7 @@ final class TranslationViewModel: ObservableObject {
                                                  adaptive: self.adaptiveRateEnabled)
                     try await self.audio.speak(job.text, language: self.target, rate: rate, onFirstBufferScheduled: { [weak self] in
                         guard let self, self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
+                        if let id = job.captionID { self.scheduledAudioIDs.insert(id) }
                         self.latestMetrics.firstBufferScheduledSeconds = ProcessInfo.processInfo.systemUptime - job.committedAtUptime
                     })
                     try Task.checkCancellation()
@@ -497,10 +513,20 @@ final class TranslationViewModel: ObservableObject {
 
     private func trimBookkeeping() {
         var live = Set(captions.map(\.id))
+        live.formUnion(committer.pendingIDs)
         if let activeTranslationID { live.insert(activeTranslationID) }
         if let activeSpeechID { live.insert(activeSpeechID) }
         invalidatedIDs.formIntersection(live)
         subtitleOnlyIDs.formIntersection(live)
+        scheduledAudioIDs.formIntersection(live)
+    }
+
+    private func trimCaptions() {
+        var protected = Set(queue.items.map(\.id))
+        protected.formUnion(speechQueue.items.compactMap(\.captionID))
+        if let activeTranslationID { protected.insert(activeTranslationID) }
+        if let activeSpeechID { protected.insert(activeSpeechID) }
+        CaptionRetention.trim(&captions, protecting: protected)
     }
 
     private func update(_ id: UUID, mutate: (inout Caption) -> Void) {

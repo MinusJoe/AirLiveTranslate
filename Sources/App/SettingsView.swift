@@ -78,6 +78,17 @@ struct SettingsView: View {
                     }
                     LabeledContent("等待翻译", value: "\(model.pendingCount) 段")
                     LabeledContent("等待播报", value: "\(model.pendingSpeechCount) 段")
+                    if let seconds = model.latestMetrics.translationSeconds {
+                        Text("最近翻译执行：\(seconds, specifier: "%.2f") 秒").font(.caption)
+                    }
+                    if let seconds = model.latestMetrics.playbackQueueSeconds {
+                        Text("最近播报排队：\(seconds, specifier: "%.2f") 秒").font(.caption)
+                    }
+                    if let seconds = model.latestMetrics.firstBufferScheduledSeconds {
+                        Text("提交到首块音频排队：\(seconds, specifier: "%.2f") 秒").font(.caption)
+                    }
+                    Text("以上是软件处理耗时，不包含完整语义等待及耳机实际出声延迟。")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
                 NavigationLink("使用说明") { usageHelp }
             }

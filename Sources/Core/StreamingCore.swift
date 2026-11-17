@@ -17,6 +17,7 @@ struct CommittedSegment: Sendable {
     let segment: SpeechSegment
     let isProvisional: Bool
     let subtitleOnly: Bool
+    var replacesIDs: [UUID] = []
 }
 
 struct CommitBatch: Sendable {
@@ -41,6 +42,7 @@ struct StreamingCommitter {
     private var candidate = ""
     private var candidateSince: TimeInterval = 0
     private var candidateCount = 0
+    var pendingIDs: [UUID] { committedIDs }
 
     init(lowLatencyEnabled: Bool = true, stabilitySeconds: TimeInterval = 0.45, confirmations: Int = 3) {
         self.lowLatencyEnabled = lowLatencyEnabled
@@ -55,6 +57,9 @@ struct StreamingCommitter {
               update.start >= finalizedThrough - 0.001 else { return CommitBatch() }
         if let phraseStart, abs(phraseStart - update.start) > 0.05 {
             if update.start >= committedThrough - 0.001 || committedIDs.isEmpty {
+                // A changed phrase boundary is not proof that an earlier speculative result was final.
+                // Revoke it explicitly instead of leaving an unconfirmed spoken caption behind.
+                batch.revisedIDs = committedIDs
                 resetPhrase()
             } else if !revisionSeen {
                 batch.revisedIDs = committedIDs
@@ -75,7 +80,8 @@ struct StreamingCommitter {
                 if update.end > start {
                     batch.segments.append(CommittedSegment(
                         segment: SpeechSegment(text: text, start: start, end: update.end, committedAtUptime: now),
-                        isProvisional: false, subtitleOnly: revisionSeen))
+                        isProvisional: false, subtitleOnly: revisionSeen,
+                        replacesIDs: revisionSeen ? committedIDs : []))
                 }
             }
             if !revisionSeen { batch.confirmedIDs = committedIDs }
@@ -171,15 +177,24 @@ struct SpeechPlaybackQueue {
     let capacity: Int
     let durationLimit: Double
     init(capacity: Int = 4, durationLimit: Double = 12) {
-        self.capacity = capacity
-        self.durationLimit = durationLimit
+        self.capacity = max(1, capacity)
+        self.durationLimit = max(1, durationLimit)
     }
-    var estimatedDuration: Double { items.reduce(0) { $0 + $1.estimatedSeconds } }
+    var estimatedDuration: Double {
+        items.reduce(0) { $0 + ($1.captionID == nil ? min(durationLimit, $1.estimatedSeconds) : $1.estimatedSeconds) }
+    }
     mutating func append(_ job: SpeechJob) -> [SpeechJob] {
-        items.append(job)
+        if job.captionID == nil {
+            // One urgent correction notice is enough; never let ordinary translations evict it.
+            guard !items.contains(where: { $0.captionID == nil }) else { return [] }
+            items.insert(job, at: 0)
+        } else {
+            items.append(job)
+        }
         var omitted: [SpeechJob] = []
         while items.count > capacity || estimatedDuration > durationLimit {
-            omitted.append(items.removeFirst())
+            guard let index = items.firstIndex(where: { $0.captionID != nil }) else { break }
+            omitted.append(items.remove(at: index))
         }
         return omitted
     }
@@ -215,4 +230,13 @@ struct ProcessingMetrics: Sendable {
     var translationSeconds: Double?
     var playbackQueueSeconds: Double?
     var firstBufferScheduledSeconds: Double?
+}
+
+enum CaptionRetention {
+    static func trim(_ captions: inout [Caption], limit: Int = 200, protecting protectedIDs: Set<UUID>) {
+        while captions.count > limit {
+            guard let index = captions.firstIndex(where: { !protectedIDs.contains($0.id) }) else { return }
+            captions.remove(at: index)
+        }
+    }
 }

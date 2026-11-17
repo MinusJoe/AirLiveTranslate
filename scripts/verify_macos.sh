@@ -47,6 +47,12 @@ xcodebuild test \
   -derivedDataPath build/DerivedData \
   -resultBundlePath "$RESULT_PATH" \
   CODE_SIGNING_ALLOWED=NO 2>&1 | tee build/ios-tests.log
+# Capture the actual initial simulator UI when using the default or supplied bundle ID.
+# This does not exercise microphones or represent a real AirPods test.
+if xcrun simctl launch "$SIMULATOR_ID" "${BUNDLE_ID:-com.example.airpodstranslator}" > build/simulator-launch.log 2>&1; then
+  sleep 2
+  xcrun simctl io "$SIMULATOR_ID" screenshot build/home-simulator.png
+fi
 # Also compile the release/device architecture before a signing workflow.
 xcodebuild build \
   -project AirPodsTranslator.xcodeproj \

@@ -2,6 +2,7 @@ import SwiftUI
 import Translation
 
 struct ContentView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var model = TranslationViewModel()
     @State private var showSettings = false
     @State private var showOriginal = true
@@ -23,17 +24,6 @@ struct ContentView: View {
             .navigationDestination(isPresented: $showSettings) {
                 SettingsView(model: model, showOriginal: $showOriginal, largeCaptions: $largeCaptions)
             }
-            .translationTask(model.translationConfiguration) { session in
-                await model.prepareResources(using: session)
-            }
-            .task { await model.refreshVariants() }
-            .onChange(of: model.resourcesReady) { _, ready in
-                if ready { continueAfterPreparationIfReady() }
-            }
-            .onChange(of: model.state) { _, state in
-                if state == .failed || state == .paused { startAfterPreparation = false }
-                else if state == .idle { continueAfterPreparationIfReady() }
-            }
             .confirmationDialog("开始前，请让周围参与者知晓正在进行语音翻译。", isPresented: $askAwareness, titleVisibility: .visible) {
                 Button("已告知，开始听译") {
                     model.awarenessConfirmed = true
@@ -50,7 +40,18 @@ struct ContentView: View {
                 Text("停止当前及等待中的旧译音，相关字幕会标记未播完。")
             }
         }
-        .tint(.teal)
+        .tint(accent)
+        .translationTask(model.translationConfiguration) { session in
+            await model.prepareResources(using: session)
+        }
+        .task { await model.refreshVariants() }
+        .onChange(of: model.resourcesReady) { _, ready in
+            if ready { continueAfterPreparationIfReady() }
+        }
+        .onChange(of: model.state) { _, state in
+            if state == .failed || state == .paused { startAfterPreparation = false }
+            else if state == .idle { continueAfterPreparationIfReady() }
+        }
     }
 
     private var header: some View {
@@ -68,7 +69,7 @@ struct ContentView: View {
                 .accessibilityLabel("打开设置")
             }
             HStack(spacing: 8) {
-                Text("\(model.source.name) → \(model.target.name)").foregroundStyle(.teal)
+                Text("\(model.source.name) → \(model.target.name)").foregroundStyle(accent)
                 Spacer(minLength: 4)
                 Label(model.isRunning ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
                     .foregroundStyle(.secondary)
@@ -128,7 +129,7 @@ struct ContentView: View {
 
     private var emptyState: some View {
         VStack(spacing: 16) {
-            Image(systemName: "waveform").font(.system(size: 34)).foregroundStyle(.teal)
+            Image(systemName: "waveform").font(.system(size: 34)).foregroundStyle(accent)
             Text(model.isRunning ? "正在听，请自然讲话" : "听懂，就从这里开始").font(.title3).fontWeight(.medium)
             Text(model.isRunning ? "原文与译文会显示在这里" : "戴好耳机，轻点开始")
                 .font(.subheadline).foregroundStyle(.secondary)
@@ -173,7 +174,7 @@ struct ContentView: View {
             }
             HStack(spacing: 7) {
                 Image(systemName: model.isRunning ? "waveform" : "pause.circle")
-                    .foregroundStyle(model.isRunning ? Color.teal : Color.secondary)
+                    .foregroundStyle(model.isRunning ? accent : Color.secondary)
                 Text(model.isRunning ? "正在听译" : model.state.rawValue).font(.caption).foregroundStyle(.secondary)
             }
             HStack(spacing: 12) {
@@ -188,8 +189,8 @@ struct ContentView: View {
                     Label(primaryTitle, systemImage: model.isRunning || model.isBusy ? "pause.fill" : "play.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity, minHeight: 60)
-                        .background(Color.teal, in: RoundedRectangle(cornerRadius: 20))
-                        .foregroundStyle(.white)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 20))
+                        .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
                 }
                 .buttonStyle(.plain)
                 if model.isRunning || model.isBusy || !model.captions.isEmpty {
@@ -216,6 +217,10 @@ struct ContentView: View {
         if model.isBusy { return "取消准备" }
         if model.isRunning { return "暂停听译" }
         return model.state == .paused ? "继续听译" : "开始听译"
+    }
+
+    private var accent: Color {
+        colorScheme == .dark ? Color(red: 0.43, green: 0.84, blue: 0.81) : Color(red: 0.03, green: 0.50, blue: 0.51)
     }
 
     private func begin() {

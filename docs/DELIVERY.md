@@ -8,14 +8,14 @@
 
 实现 Apple SpeechAnalyzer → TranslationSession → AVSpeechSynthesizer 的设备端链路。功能包含语言资源准备、音频能力检查、实际输入输出显示、麦克风电平、双语字幕、条件性单耳输出、暂停/恢复/结束、显式手机收音备用及错误反馈。
 
-本版按最终识别片段翻译，不会把暂定文字直接播出；长句等待与多语言质量尚待测量。端到端效果、远场与独立单耳输出组合、译音回采、锁屏长时运行没有真机证明。
+第二版将首页改为字幕与开始/暂停优先，设置独立成页。快速模式可提前翻译经过多次稳定确认、且有真实音频边界的完整短句；稳健模式等待最终片段。翻译与播报并行，有界积压保留字幕并标记未播，修订会撤销旧待播、必要时播放短提示。地区识别选项来自设备支持列表，不宣称口音准确率已有提升。端到端延迟、远场与独立单耳输出、译音回采及锁屏长时运行仍需真机验证。
 
 ## 分工与复核
 
 - 需求 agent：需求基线、可验收条件、能力与产品声明边界。
-- 开发 agent：7 个 Swift 源文件、纯核心回归测试及修复。
+- 开发 agent：流式分段、独立翻译/播报工作队列、地区识别及回归修复。
 - 核查 agent：公开 API 签名、需求合理性、生命周期/路由/音频处理核查、真机计划与独立报告。
-- 主 agent：Xcode 工程、Codemagic、PCM 回归测试、构建脚本、源码打包与交付集成。
+- 主 agent：原生首页/设置页、Xcode 工程、GitHub Actions/Codemagic、PCM 回归测试、源码打包与GitHub交付。
 
 审查细节见 [REVIEW.md](REVIEW.md)；需求覆盖见 [ACCEPTANCE.md](ACCEPTANCE.md)。
 
@@ -23,7 +23,7 @@
 
 | 检查 | 结果与范围 |
 | --- | --- |
-| Python 工程生成 | 通过；7 个 Swift 源码、2 个测试文件、49 个 Xcode 对象 |
+| Python 工程生成 | 通过；9 个 Swift 源码、4 个测试文件、57 个 Xcode 对象 |
 | 确定性生成 | 通过；重复生成的 `project.pbxproj` SHA256 一致 |
 | 工程结构检查 | 通过；源文件存在及入工程、对象引用、shared scheme 测试 target、部署版本 |
 | 权限与隐私 plist | Python plist 解析通过；麦克风说明、后台 audio、无追踪声明存在 |
@@ -33,12 +33,11 @@
 | Swift 源码空白检查 | 通过；此项不是 Swift 语法或类型检查 |
 | App 图标 | 1024×1024 无透明 PNG 已生成并目视检查 |
 
-`Tests` 中提供 12 个 XCTest 测试：6 个纯核心测试、6 个 iOS PCM 测试。它们是待执行的测试源码，本机没有 Swift 编译器，不把测试数量当成通过数量。
+测试分为纯核心队列/修订/地区匹配与 iOS PCM 音频测试，具体数量以对应提交的 CI 日志为准。第二版已接入 GitHub Actions：首轮 [44147603126](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44147603126) 在 Linux/macOS 成功编译核心并执行 27 项测试，发现 1 项拥塞更正提示测试失败；修复通过优先保留提示实现，不删除失败断言。最终结果由同一分支的后续 CI 和核查报告记录。
 
 ## 尚未执行
 
-- `swift test`，Swift 类型检查与链接。
-- `xcodebuild test` 的模拟器 hosted XCTest。
+- 首轮失败修复后的全部核心测试验收及 iOS hosted XCTest：见最新 CI，不能以初轮编译成功代替测试通过。
 - iPhone Release 编译、签名、安装。
 - Codemagic 实际运行及构建日志核验。
 - AirPods 远场、左右物理输出、译音回采、路由变化时的实际行为。
@@ -48,7 +47,7 @@
 
 ## 下一道验证关卡
 
-1. 在 Codemagic 连接 `MinusJoe/AirLiveTranslate` 仓库。
+1. 先检查 [GitHub Actions](https://github.com/MinusJoe/AirLiveTranslate/actions) 对应提交的无签名验证，再在 Codemagic 连接仓库。
 2. 先运行 `ios-verify`；查看真实编译及 XCTest 结果，有问题按日志修复。
 3. 在平台配置匹配的 Apple Distribution 证书、Ad Hoc profile 与测试 iPhone UDID，并修改两处 Bundle ID。
 4. 运行 `ios-signed` 导出 IPA，安装后按 [DEVICE_TEST_PLAN.md](DEVICE_TEST_PLAN.md) 验收。
