@@ -45,6 +45,8 @@
 
 ## Windows → Codemagic → iPhone
 
+已有自己的签名证书、只需要IPA时，在功能分支选择 `ios-unsigned-ipa`。它使用 iPhoneOS SDK 生成 arm64 Release archive，验证平台后打包 `Payload/*.app` 为 `AirLiveTranslate-unsigned.ipa`。这是真机应用包，需由你另行签名后安装；流程不会读取或上传你的证书。不要把 `ios-verify` 的模拟器 `.app.zip` 改后缀当作真机IPA。
+
 ### 1. 使用独立仓库根目录
 
 本仓库已按独立 App 布局组织，`codemagic.yaml` 位于仓库根目录。在 Codemagic 中连接 `MinusJoe/AirLiveTranslate`。PR #1 尚未合并时，请选择 `codex/low-latency-ui` 分支测试本版本；合并后再选择 `main`。源码压缩包按相同根目录结构打包。
