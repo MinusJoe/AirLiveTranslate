@@ -33,12 +33,15 @@
 | Swift 源码空白检查 | 通过；此项不是 Swift 语法或类型检查 |
 | App 图标 | 1024×1024 无透明 PNG 已生成并目视检查 |
 
-测试分为纯核心队列/修订/地区匹配与 iOS PCM 音频测试，具体数量以对应提交的 CI 日志为准。第二版已接入 GitHub Actions：首轮 [44147603126](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44147603126) 在 Linux/macOS 成功编译核心并执行 27 项测试，发现 1 项拥塞更正提示测试失败；修复通过优先保留提示实现，不删除失败断言。最终结果由同一分支的后续 CI 和核查报告记录。
+第二版已通过真实云端验证，测试代码包括 28 项纯核心队列/修订/地区匹配测试及 6 项 iOS PCM 测试。
+
+- 首轮 [44147603126](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44147603126) 发现更正提示会被普通积压挤掉，保留失败断言并修复队列优先级。
+- 修复后代码 `c3d8e6ef7b9b91879443a290780e3340a9c12105` 在 [44148400819](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44148400819) 通过：Linux 核心 28 项、macOS/Xcode 26.6 核心 28 项、iOS hosted XCTest 34 项零失败，以及 Release 真机架构无签名编译。
+- 测试后的可选截图最初因模拟器已关闭而未取得；后续构建脚本显式启动模拟器、安装 app、启动后截图。截图只证明模拟器界面，不证明 AirPods 或语言模型效果。
 
 ## 尚未执行
 
-- 首轮失败修复后的全部核心测试验收及 iOS hosted XCTest：见最新 CI，不能以初轮编译成功代替测试通过。
-- iPhone Release 编译、签名、安装。
+- iPhone 签名、安装；Release 架构编译已通过。
 - Codemagic 实际运行及构建日志核验。
 - AirPods 远场、左右物理输出、译音回采、路由变化时的实际行为。
 - 六个有向语言对、断网、锁屏、长时稳定性、耗电及真实出声延迟。

@@ -4,7 +4,7 @@
 
 原生 iPhone 实验版：双耳自戴，用蓝牙耳机远场采集周围讲话，识别、翻译后向指定耳侧播报。首批候选语言为中文、英语和日语，逐方向检测系统资源。没有云端模型密钥、第三方 SDK 或自建服务依赖。
 
-**当前交付为源码与构建配置，不是已签名 IPA。Windows 环境没有执行 Swift 编译、XCTest 或 AirPods 真机测试。必须通过 Codemagic/macOS 构建和设备验收后，才能确认可安装及实际听译效果。**
+**第二版已通过 GitHub Actions 验证：Linux/macOS 28 项核心测试、iOS 模拟器 34 项测试、真机架构 Release 无签名编译。** [验证记录](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44148400819) 对应代码提交 `c3d8e6ef`。当前没有签名 IPA；AirPods 真机效果、声学延迟及口音质量仍待实测。
 
 用户目标设备：iPhone 17 / iOS 27.0.1 / AirPods Pro 3（实际固件版本待记录）。最低部署 iOS 26.0；编译 SDK 至少 iOS 26.2，耳机远场 API 在 iOS 26.2+ 才尝试使用。
 

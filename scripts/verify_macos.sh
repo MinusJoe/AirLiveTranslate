@@ -43,16 +43,21 @@ xcodebuild test \
   -project AirPodsTranslator.xcodeproj \
   -scheme AirPodsTranslator \
   -configuration Debug \
+  -parallel-testing-enabled NO \
   -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
   -derivedDataPath build/DerivedData \
   -resultBundlePath "$RESULT_PATH" \
   CODE_SIGNING_ALLOWED=NO 2>&1 | tee build/ios-tests.log
-# Capture the actual initial simulator UI when using the default or supplied bundle ID.
-# This does not exercise microphones or represent a real AirPods test.
-if xcrun simctl launch "$SIMULATOR_ID" "${BUNDLE_ID:-com.example.airpodstranslator}" > build/simulator-launch.log 2>&1; then
-  sleep 2
-  xcrun simctl io "$SIMULATOR_ID" screenshot build/home-simulator.png
-fi
+# XCTest can use/stop a simulator clone. Explicitly boot and install onto the
+# selected device before capturing actual UI; no microphone or AirPods exercise.
+xcrun simctl boot "$SIMULATOR_ID" 2>/dev/null || true
+xcrun simctl bootstatus "$SIMULATOR_ID" -b
+SIM_APP='build/DerivedData/Build/Products/Debug-iphonesimulator/AirPodsTranslator.app'
+SIM_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$SIM_APP/Info.plist")"
+xcrun simctl install "$SIMULATOR_ID" "$SIM_APP"
+xcrun simctl launch "$SIMULATOR_ID" "$SIM_BUNDLE_ID" > build/simulator-launch.log 2>&1
+sleep 2
+xcrun simctl io "$SIMULATOR_ID" screenshot build/home-simulator.png
 # Also compile the release/device architecture before a signing workflow.
 xcodebuild build \
   -project AirPodsTranslator.xcodeproj \

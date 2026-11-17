@@ -2,13 +2,51 @@
 
 日期：2026-11-18（Asia/Tokyo）。角色：需求/实现独立核查 agent。
 
-> 第二版增量审查进行中：低延迟提交、识别地区变体、翻译/播报并行和简洁主页。下面第一版问题闭环保留作历史依据；第二版最终结论、CI 证据和新增问题将在交付前更新，不能把第一版静态结论直接用于新实现。
+## 第二版增量审查
 
-## 结论与证据等级
+当前结论：**Partially verified：核心回归、iOS hosted XCTest 和无签名真机架构编译已通过；AirPods 真机与声学性能未验证。** 已审查低延迟提交、地区选择、并行翻译/播报、修订处理、简洁主页与设置页。独立核查新增 `Tests/StreamingAdversarialTests.swift`，包含 12 个非声学的合成识别事件/队列对抗用例。最终未发现阻断本轮源码交付的已确认缺陷。
 
-**Partially verified。** 需求已收敛为合理的实验 MVP；已逐文件审查原生源码、工程生成器、资源清单和 Codemagic 工作流，并对关键 Apple API 查阅官方文档。代码审查发现的问题已反馈开发并逐项复核。
+### 真实 CI 证据
 
-当前不具备 Swift/Xcode/iPhone/AirPods 执行环境。**没有 Swift 编译、XCTest 执行、Codemagic 运行、签名 IPA 安装或真实耳机效果的通过证据。** 本报告不能用于宣称 App 已编译、已安装、已实现物理单耳隔离或达到同传延迟。
+- 首轮候选 `f641eac`，GitHub Actions run `44147603126`：协调 agent 读取日志确认 Linux 与 macOS 的核心 Swift 代码真实编译成功；27 个核心测试中，更正提示拥塞测试失败。
+- 失败位置是独立测试 `testCongestionCannotSilentlyEvictTheOnlyCorrectionNotice`：普通译音会挤掉唯一更正提示。该提交早于队列优先级修复。修复保留测试断言，优先保留/合并更正提示并剔除普通积压。
+- 最终代码候选：`c3d8e6ef7b9b91879443a290780e3340a9c12105`，对应 [GitHub Actions run 44148400819](https://github.com/MinusJoe/AirLiveTranslate/actions/runs/44148400819)。以下结果由协调 agent 读取该次 CI 日志后交付核查记录。
+- Linux：28 个核心测试全部通过，包括原失败的更正提示拥塞用例和新增活跃字幕保留用例。
+- macOS / Xcode 26.6：28 个核心测试全部通过。
+- iOS hosted XCTest：34 个测试、0 失败（28 核心 + 6 PCM），日志 `TEST SUCCEEDED`，记录时间 18:35:23 UTC。
+- Release 真机架构无签名编译：`BUILD SUCCEEDED`，记录时间 18:35:55 UTC。
+- 这次 CI 没有签名/安装 IPA，没有连接 AirPods，也没有用真人口音语料评测。模拟器测试与 iPhoneOS 编译不能证明耳机远场、单耳隔离、锁屏、声学延迟或口音准确率。
+
+### 第二版发现与闭环
+
+| ID | 问题 / 证据 | 处理与剩余验证 |
+|---|---|---|
+| V2-01 | `contextualStrings` 对 SpeechTranscriber 无实际提示作用，不能包装为术语或口音增强。[Apple 工程师答复](https://developer.apple.com/forums/thread/811083)与[官方模块文档](https://developer.apple.com/documentation/speech/analysiscontext/contextualstrings)共同确认。 | 未集成无效开关；仅使用系统真实支持的地区模型和识别速度/精度策略。口音效果须人工语料实测。 |
+| V2-02 | 系统可能返回带 script 的 locale，简单字符串匹配会误拒绝 zh-Hans-CN 等同地区模型。 | 按语言代码和地区匹配，传给引擎实际 supported Locale，界面展示实际 identifier；独立测试覆盖且禁止跨地区静默回退。 |
+| V2-03 | 普通积压会静默淘汰更正提示，锁屏用户无法知道之前译音已失效。 | notice 置队首、合并为一条、不能被普通片段淘汰，也不被普通过期规则跳过；真实失败后，修复已由 Linux/macOS 核心与 iOS hosted 回归验证。 |
+| V2-04 | 原方案对所有修订一律仅保字幕，即使旧片段从未排出音频，也不播放最终正确内容。 | 根据首个音频块是否排队作保守区分：未排音频时播最终正确句一次；可能已入耳时撤销旧音频、保留更正字幕并提示。软件排队不冒充实际声学播放证据。 |
+| V2-05 | 超过 200 条字幕时可能滚掉仍在播放的长片段，之后跳到当前会丢失未播完标记和累计计数。 | `CaptionRetention.trim` 保护活动和两条队列中的字幕，优先滚动非活动记录，已增加回归测试。 |
+| V2-06 | 早提交文字被引擎以空 volatile 撤回，或当前范围改变，不能当作普通空文本忽略。 | 核心显式返回撤销 ID；VM 撤销待译/待播，停止相关正在播放的片段；final 修订不重复播放旧前缀。 |
+| V2-07 | 新 locale 代码使用 macOS 13+ Foundation API，SwiftPM 默认旧部署目标可能无法编译。 | Package 明确 macOS 13；真实 Linux/macOS 核心与 iOS 编译均已成功。 |
+| V2-08 | 简洁主页若不显示 provisional/note，用户可能把提前播出的文字当最终结果；prepare→start 还需等待 idle，资源任务也不应绑在会随导航消失的首页。 | 主页条件显示提前译出与修订说明；自动启动同时检查资源就绪和状态；translationTask 放外层 NavigationStack，实际 locale 与快结果精度权衡放设置页。 |
+
+### 第二版静态边界
+
+- 提前提交是启发式：完整句末、至少 3 次稳定和 0.45 秒、可靠音频边界及后续音频。排除了小数与常见缩写，逗号不作为早提交边界。它不是语言学语义正确性证明，晚到否定仍可能推翻已播内容。
+- 翻译和 TTS 分为独立有序任务；一个翻译请求按顺序完成并进入有限播报队列，播放器仍串行播报。系统过载时保字幕并明确标未播，识别/翻译本身过载则暂停。
+- 会话 epoch、播放 epoch 和底层 audio generation 共同保护取消、跳到当前及修订后的迟到回调。尚无完整硬件状态机自动化，因此真机 LIFE/PIPE 用例仍是必要门槛。
+- 识别地区不是任意口音修复；fastResults 本身以准确率换响应速度，稳健模式只保留 volatileResults 并等待最终提交。
+- 首 buffer 排队、翻译耗时和等待队列耗时是软件指标，不能当作耳机实际声学延迟。没有证据证明达到 1.5–3 秒或改善了某种口音。
+
+第二版对抗用例及真机要求见 `DEVICE_TEST_PLAN.md` 的 STREAM/PIPE/LOCALE/UI 表。下面是第一版归档，不代表第二版已完成相同运行验证。
+
+第二版本地独立执行 `verify_project.py`：退出码 0，9 个 Swift 源文件、4 个测试文件、57 个 Xcode 对象的结构检查通过。此结果仍不替代 Apple 编译或真机验证。
+
+## 第一版归档：结论与证据等级
+
+**第一版当时的结论为 Partially verified。** 需求收敛为合理的实验 MVP；逐文件审查了原生源码、工程生成器、资源清单和 Codemagic 工作流，并对关键 Apple API 查阅官方文档。代码审查发现的问题已反馈开发并逐项复核。
+
+第一版交付时没有 Swift/Xcode/iPhone/AirPods 执行环境，**当时没有 Swift 编译、XCTest 执行、Codemagic 运行、签名 IPA 安装或真实耳机效果的通过证据。** 第二版已补齐编译与自动化测试证据，见本报告开头；安装、物理单耳隔离与同传延迟依然不能据此宣称通过。
 
 最终源码复核已完成，下表的代码问题已关闭；本轮未发现仍需阻断源码交付的已确认缺陷。硬件可行性与 Apple 编译仍是发布前门槛，不能因审查完成而略过。
 
@@ -66,7 +104,7 @@
 
 协调 agent 另行检查了确定性生成、Python 语法、YAML 解析与 shell 语法；对应状态应以交付说明/实际日志为准。核心和 iOS 回归共 12 个测试声明，当前均未在 Apple 环境执行。
 
-## 发布前必须完成
+## 第一版列出的发布前门槛（历史记录）
 
 1. 运行 Codemagic `ios-verify`，保存 Swift 测试、iOS XCTest、无签名 Release 编译日志。
 2. 修复实际编译/测试错误后重跑相关检查；不可仅以结构验证脚本通过替代。
