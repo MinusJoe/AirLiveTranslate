@@ -1,0 +1,51 @@
+# Use airpods-translator as the root of its own repository (see README).
+# No publishing/webhooks are enabled. Start a workflow explicitly in Codemagic.
+workflows:
+  ios-verify:
+    name: Core tests and iOS simulator verification
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+    scripts:
+      - name: Generate project
+        script: python3 scripts/generate_project.py
+      - name: Run core tests and iOS hosted tests
+        script: bash scripts/verify_macos.sh
+    artifacts:
+      - build/*.log
+      - build/*.xcresult
+      - build/DerivedData/Build/Products/Debug-iphonesimulator/*.app
+
+  ios-signed:
+    name: Signed IPA for registered iPhones
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      xcode: latest
+      # Replace BOTH bundle IDs below with your own registered explicit App ID.
+      # Upload matching distribution certificate/profile in Codemagic first.
+      ios_signing:
+        distribution_type: ad_hoc
+        bundle_identifier: com.example.airpodstranslator
+      vars:
+        BUNDLE_ID: com.example.airpodstranslator
+    scripts:
+      - name: Generate project with unique build number
+        script: |
+          set -euo pipefail
+          python3 scripts/generate_project.py --bundle-id "$BUNDLE_ID" --build-number "${BUILD_NUMBER:-1}"
+      - name: Verify before signing
+        script: bash scripts/verify_macos.sh
+      - name: Configure signing from uploaded profiles
+        script: xcode-project use-profiles
+      - name: Build IPA
+        script: |
+          set -euo pipefail
+          xcode-project build-ipa --project AirPodsTranslator.xcodeproj --scheme AirPodsTranslator
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/*.log
+      - build/*.xcresult
+      - /tmp/xcodebuild_logs/*.log
+      - build/ios/xcarchive/*.xcarchive
