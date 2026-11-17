@@ -187,11 +187,20 @@ enum CaptionStatus: String, Sendable {
 struct Caption: Identifiable, Sendable {
     let id: UUID
     let original: String
+    let targetLanguage: AppLanguage
     var translated: String = ""
     var status: CaptionStatus = .waiting
     var processingSeconds: Double?
     var isProvisional = false
     var note: String?
+    var replayStatus: ReplayStatus = .never
+    var lastReplayAt: Date?
+
+    init(id: UUID, original: String, targetLanguage: AppLanguage = .chinese) {
+        self.id = id
+        self.original = original
+        self.targetLanguage = targetLanguage
+    }
 }
 
 /// Real output capability, including system mono mixing, gates one-ear playback.

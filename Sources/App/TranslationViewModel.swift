@@ -30,8 +30,15 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var actualLocaleIdentifier = "尚未启动"
     @Published var lowLatencyEnabled = true
     @Published var adaptiveRateEnabled = true
-    @Published var captureSource: CaptureSource = .headset { didSet { snapshot = AudioSnapshot() } }
-    @Published var outputSide: OutputSide = .both
+    @Published var captureSource: CaptureSource = .headset {
+        didSet {
+            if oldValue != captureSource { stopReplay(reason: "收音设置已变化，已停止重播。") }
+            snapshot = AudioSnapshot()
+        }
+    }
+    @Published var outputSide: OutputSide = .both {
+        didSet { if oldValue != outputSide { stopReplay(reason: "播放耳侧已变化，已停止重播。") } }
+    }
     @Published var speakingRate: Double = 0.5
     @Published var awarenessConfirmed = false
     @Published private(set) var state: SessionState = .idle
@@ -48,6 +55,9 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var microphonePermission = "未请求"
     @Published private(set) var preparedKey: String?
     @Published var translationConfiguration: TranslationSession.Configuration?
+    @Published private(set) var replayingCaptionID: UUID?
+    @Published private(set) var isReplaying = false
+    @Published private(set) var replayMessage = ""
 
     private let audio = AudioController()
     private let speech = SpeechRecognizer()
@@ -68,12 +78,25 @@ final class TranslationViewModel: ObservableObject {
     private var pipelineTask: Task<Void, Never>?
     private var speechTask: Task<Void, Never>?
     private var cleanupTask: Task<Void, Never>?
+    private var replayTask: Task<Void, Never>?
+    private var replayProgress = ReplayProgress()
+    private var replayPlanIDs: [UUID] = []
 
     var languageKey: String { "\(source.rawValue):\(sourceVariant.rawValue)>\(target.rawValue)" }
     var resourcesReady: Bool { preparedKey == languageKey }
     var isRunning: Bool { state == .listening }
     var isBusy: Bool { [.preparing, .checking, .starting].contains(state) }
-    var canConfigure: Bool { !isBusy && !isRunning }
+    var canConfigure: Bool { !isBusy && !isRunning && !isReplaying }
+    var unheardCaptions: [Caption] { captions.filter(ReplayPolicy.needsCatchUp) }
+
+    func canReplay(_ caption: Caption) -> Bool { ReplayPolicy.canReplay(caption) }
+
+    func replayUnavailableReason(_ caption: Caption) -> String? {
+        if caption.status == .superseded { return "旧译文已修订，不能重播。" }
+        if caption.translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "此条尚无译文，不能重播。" }
+        if caption.translated.count > ReplayPolicy.maximumCaptionCharacters { return "译文超过单条 1800 字的重播上限。" }
+        return nil
+    }
 
     func refreshVariants() async {
         let language = source
@@ -182,6 +205,7 @@ final class TranslationViewModel: ObservableObject {
 
     func start() {
         guard canConfigure, resourcesReady, source != target, awarenessConfirmed else { return }
+        replayMessage = ""
         let token = epoch.advance()
         let requestedSource = source
         let requestedVariant = sourceVariant
@@ -264,6 +288,7 @@ final class TranslationViewModel: ObservableObject {
     }
 
     func stop(reason: String = "已暂停。尚未播完的片段不会自动重播。", failed: Bool = false, end: Bool = false) {
+        stopReplay(reason: "已停止重播；尚未播完的内容可再次补听。")
         epoch.advance()
         preparationEpoch = nil
         translationConfiguration = nil
@@ -298,6 +323,7 @@ final class TranslationViewModel: ObservableObject {
         stop(reason: "会话已结束，当前会话字幕已清空。", end: true)
         captions.removeAll()
         skippedAudioCount = 0
+        replayMessage = ""
     }
 
     func clearCaptions() {
@@ -307,10 +333,129 @@ final class TranslationViewModel: ObservableObject {
     }
 
     private func invalidatePreparation() {
+        stopReplay(reason: "语言设置已变化，已停止重播。")
         preparedKey = nil
         translationConfiguration = nil
         preparationEpoch = nil
         if isRunning || isBusy { stop(reason: "语言已变化，请重新准备资源。") }
+    }
+
+    /// The UI confirms pausing live listening before calling these replay entry points.
+    func replayCaption(_ id: UUID) {
+        guard let caption = captions.first(where: { $0.id == id }) else {
+            replayMessage = "此条字幕已不在当前内存中，无法重播。"
+            return
+        }
+        if let reason = replayUnavailableReason(caption) {
+            replayMessage = reason
+            return
+        }
+        beginReplay(from: [caption])
+    }
+
+    func replayUnheard() {
+        // Snapshot the list the person selected before pausing live work. Newly interrupted live
+        // captions remain available for the next batch instead of silently joining this batch.
+        let candidates = unheardCaptions
+        guard !candidates.isEmpty else {
+            replayMessage = "当前没有可补听的未完整播出译文。"
+            return
+        }
+        beginReplay(from: candidates)
+    }
+
+    func stopReplay(reason: String = "已停止重播。未完成的条目可再次补听；实时收音不会自动恢复。") {
+        guard isReplaying else { return }
+        replayProgress.cancel()
+        replayTask?.cancel()
+        replayTask = nil
+        for id in replayPlanIDs {
+            update(id) {
+                if $0.replayStatus == .queued || $0.replayStatus == .playing { $0.replayStatus = .interrupted }
+            }
+        }
+        replayPlanIDs.removeAll()
+        replayingCaptionID = nil
+        audio.stop()
+        isReplaying = false
+        replayMessage = reason
+        message = reason
+        // Do not call start(): replay is never consent to resume environmental capture.
+    }
+
+    private func beginReplay(from candidates: [Caption]) {
+        let plan = ReplayPlan.make(from: candidates)
+        guard !plan.items.isEmpty else {
+            replayMessage = "所选内容不可重播。需有有效译文，且每条不超过 1800 字。"
+            return
+        }
+        stop(reason: "实时听译已暂停。现在只播放译文，不采集周围声音。")
+        let token = replayProgress.begin()
+        let side = outputSide
+        let rate = Float(speakingRate)
+        let cleanup = cleanupTask
+        replayPlanIDs = plan.items.map(\.id)
+        for id in replayPlanIDs { update(id) { $0.replayStatus = .queued } }
+        isReplaying = true
+        replayMessage = "准备重播 \(plan.items.count) 条；麦克风保持关闭。"
+        if plan.omittedCount > 0 { replayMessage += " 另有 \(plan.omittedCount) 条保留到下一批。" }
+        if plan.unavailableCount > 0 { replayMessage += " \(plan.unavailableCount) 条不满足播放条件。" }
+        replayTask = Task { [weak self] in
+            guard let self else { return }
+            await cleanup?.value
+            do {
+                try Task.checkCancellation()
+                guard self.replayProgress.accepts(token), self.isReplaying else { return }
+                let replaySnapshot = try await self.audio.configurePlayback(side: side) { [weak self] reason in
+                    guard let self, self.replayProgress.accepts(token) else { return }
+                    self.stopReplay(reason: "重播已停止：\(reason) 实时收音未恢复。")
+                }
+                try Task.checkCancellation()
+                guard self.replayProgress.accepts(token), self.isReplaying else { return }
+                self.snapshot = replaySnapshot
+                for (index, item) in plan.items.enumerated() {
+                    try Task.checkCancellation()
+                    guard self.replayProgress.accepts(token), self.isReplaying else { return }
+                    guard let caption = self.captions.first(where: { $0.id == item.id }),
+                          ReplayPolicy.canReplay(caption), caption.translated == item.text,
+                          caption.targetLanguage == item.language else {
+                        throw PipelineError.message("字幕内容或有效性已变化，已停止此次重播。")
+                    }
+                    guard self.replayProgress.startItem(item.id, token: token) else { return }
+                    self.replayingCaptionID = item.id
+                    self.update(item.id) { $0.replayStatus = .playing }
+                    self.replayMessage = "正在重播 \(index + 1)/\(plan.items.count) · \(item.language.name)；麦克风关闭。"
+                    for chunk in item.chunks {
+                        try Task.checkCancellation()
+                        guard self.replayProgress.accepts(token), self.isReplaying else { return }
+                        if chunk.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                        // Chunked synthesis is bounded but has no live 12-second/15-second expiry.
+                        // The saved language belongs to the caption, not to the current settings.
+                        try await self.audio.speak(chunk, language: item.language, rate: rate)
+                        try Task.checkCancellation()
+                        guard self.replayProgress.accepts(token), self.isReplaying else { return }
+                    }
+                    guard self.replayProgress.finishItem(item.id, token: token) else { return }
+                    self.update(item.id) {
+                        $0.replayStatus = .completed
+                        $0.lastReplayAt = Date()
+                    }
+                    self.replayingCaptionID = nil
+                }
+                guard self.replayProgress.accepts(token), self.isReplaying else { return }
+                self.audio.stop()
+                self.replayPlanIDs.removeAll()
+                self.replayTask = nil
+                self.isReplaying = false
+                self.replayMessage = "已完整重播 \(plan.items.count) 条。实时收音保持暂停。"
+                if plan.omittedCount > 0 { self.replayMessage += " 还有 \(plan.omittedCount) 条可在下一批补听。" }
+                self.message = self.replayMessage
+            } catch {
+                guard self.replayProgress.accepts(token), !Task.isCancelled else { return }
+                if let id = self.replayingCaptionID { self.update(id) { $0.replayStatus = .failed } }
+                self.stopReplay(reason: "重播未完成：\(error.localizedDescription) 未完成条目可重试；实时收音未恢复。")
+            }
+        }
     }
 
     func skipToLive() {
@@ -338,7 +483,7 @@ final class TranslationViewModel: ObservableObject {
         do {
             for committed in batch.segments {
                 let segment = committed.segment
-                var caption = Caption(id: segment.id, original: segment.text)
+                var caption = Caption(id: segment.id, original: segment.text, targetLanguage: target)
                 caption.isProvisional = committed.isProvisional
                 if committed.subtitleOnly && committed.replacesIDs.contains(where: scheduledAudioIDs.contains) {
                     subtitleOnlyIDs.insert(segment.id)

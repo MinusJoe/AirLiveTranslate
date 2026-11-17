@@ -27,6 +27,7 @@ final class AudioController {
     private var expectedInputUID: String?
     private var expectedOutputUID: String?
     private var selectedSource: CaptureSource = .headset
+    private var captureRequired = false
     private var selectedSide: OutputSide = .both
     private var playbackGeneration = UUID()
     private var routeGeneration = UUID()
@@ -47,6 +48,7 @@ final class AudioController {
         stop()
         snapshot = AudioSnapshot()
         selectedSource = source
+        captureRequired = true
         var options: AVAudioSession.CategoryOptions = []
         if source == .headset {
             guard #available(iOS 26.2, *) else {
@@ -103,16 +105,41 @@ final class AudioController {
         expectedInputUID = session.currentRoute.inputs.first?.uid
         expectedOutputUID = session.currentRoute.outputs.first?.uid
 
-        let hardware = engine.outputNode.outputFormat(forBus: 0)
-        guard hardware.sampleRate > 0, hardware.channelCount > 0,
-              let format = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate,
-                                        channels: snapshot.output.supportsSingleEar ? 2 : 1) else {
-            throw PipelineError.message("当前耳机播放格式不可用。")
-        }
-        playbackFormat = format
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
+        try configureOutputGraph()
         snapshot.detail = source == .headset ? "耳机远场收音已实际启用" : "已使用你选择的手机麦克风"
+        return snapshot
+    }
+
+    /// Replay never asks for microphone access, creates an input node, or starts a capture tap.
+    func configurePlayback(side: OutputSide, onRouteFailure: @escaping @MainActor (String) -> Void) async throws -> AudioSnapshot {
+        try Task.checkCancellation()
+        stop()
+        snapshot = AudioSnapshot()
+        captureRequired = false
+        selectedSide = side
+        try session.setCategory(.playback, mode: .spokenAudio, options: [])
+        try session.setActive(true)
+        try? session.setPreferredOutputNumberOfChannels(2)
+        for _ in 0..<12 {
+            try Task.checkCancellation()
+            if inspectRoute().output.isHeadphones { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        try Task.checkCancellation()
+        snapshot = inspectRoute()
+        snapshot.inputName = "未启用（仅播放译文）"
+        guard snapshot.output.permits(side) else {
+            throw PipelineError.message("当前输出不是耳机，或无法保证指定耳播放。重播已阻止，请检查耳机设置。")
+        }
+        expectedOutputUID = session.currentRoute.outputs.first?.uid
+        expectedInputUID = nil
+        try configureOutputGraph()
+        try validateRoute()
+        engine.prepare()
+        try engine.start()
+        try validateRoute()
+        observeRoute(onFailure: onRouteFailure)
+        snapshot.detail = "仅播放已生成译文，麦克风未启用"
         return snapshot
     }
 
@@ -261,6 +288,7 @@ final class AudioController {
         playbackFormat = nil
         expectedInputUID = nil
         expectedOutputUID = nil
+        captureRequired = false
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
@@ -271,6 +299,18 @@ final class AudioController {
             completion.yield(())
         }
         if !player.isPlaying { player.play() }
+    }
+
+    private func configureOutputGraph() throws {
+        let hardware = engine.outputNode.outputFormat(forBus: 0)
+        guard hardware.sampleRate > 0, hardware.channelCount > 0,
+              let format = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate,
+                                        channels: snapshot.output.supportsSingleEar ? 2 : 1) else {
+            throw PipelineError.message("当前耳机播放格式不可用。")
+        }
+        playbackFormat = format
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
     }
 
     private func inspectRoute() -> AudioSnapshot {
@@ -300,11 +340,11 @@ final class AudioController {
 
     private func validateRoute() throws {
         let route = session.currentRoute
-        guard route.inputs.first?.uid == expectedInputUID, route.outputs.first?.uid == expectedOutputUID,
+        guard (!captureRequired || route.inputs.first?.uid == expectedInputUID), route.outputs.first?.uid == expectedOutputUID,
               inspectRoute().output.permits(selectedSide) else {
             throw PipelineError.message("音频路由已变化，已停止播报。请重新检查耳机。")
         }
-        if selectedSource == .headset {
+        if captureRequired && selectedSource == .headset {
             guard inspectRoute().farFieldEnabled else {
                 throw PipelineError.message("远场收音已失效，已停止。")
             }

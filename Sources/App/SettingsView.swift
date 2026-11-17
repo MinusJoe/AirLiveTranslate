@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var model: TranslationViewModel
     @Binding var showOriginal: Bool
     @Binding var largeCaptions: Bool
+    @Binding var highlightInformation: Bool
 
     var body: some View {
         Form {
@@ -58,6 +59,7 @@ struct SettingsView: View {
             Section("字幕与声音") {
                 Toggle("显示原文", isOn: $showOriginal)
                 Toggle("大字字幕", isOn: $largeCaptions)
+                Toggle("高亮关键信息", isOn: $highlightInformation)
                 HStack {
                     Text("播报速度")
                     Slider(value: $model.speakingRate, in: 0.35...0.6).accessibilityLabel("基础播报速度")
@@ -78,6 +80,7 @@ struct SettingsView: View {
                     }
                     LabeledContent("等待翻译", value: "\(model.pendingCount) 段")
                     LabeledContent("等待播报", value: "\(model.pendingSpeechCount) 段")
+                    LabeledContent("实时跳过 / 拥塞未播累计", value: "\(model.skippedAudioCount) 段")
                     if let seconds = model.latestMetrics.translationSeconds {
                         Text("最近翻译执行：\(seconds, specifier: "%.2f") 秒").font(.caption)
                     }
@@ -111,6 +114,8 @@ struct SettingsView: View {
                 Text("快速响应依赖稳定片段，仍可能出现修订。否定、数字及长句需要更多上下文，不能保证固定的反应时间。")
             }
             Section("声音与字幕") {
+                Text("轻点已有译文可以重播。实时听译中会先询问暂停；重播完成不会自动恢复收音。未播内容可从首页的补听入口按顺序播放。")
+                Text("高亮仅提示常见数字、金额、日期和否定表达，不会改写原文，也不保证译文正确。重播使用字幕生成时的目标语言，不保存原声。")
                 Text("翻译与播报同时进行。译音跟不上时可能只保留字幕；未播完的内容会有标记。你也可以主动跳到当前讲话。")
                 Text("暂停停止收音和播报；继续只处理新的讲话。耳机断连或系统音频中断后，需要手动恢复。")
                 Text("单耳静音不等于单耳通透。远场效果、译音回采、口音准确率及锁屏连续性需要在你的设备上验证。")

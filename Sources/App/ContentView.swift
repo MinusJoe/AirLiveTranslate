@@ -7,6 +7,10 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showOriginal = true
     @State private var largeCaptions = false
+    @State private var highlightInformation = true
+    @State private var showCatchUp = false
+    @State private var askReplay = false
+    @State private var pendingReplayID: UUID?
     @State private var askAwareness = false
     @State private var askSkip = false
     @State private var startAfterPreparation = false
@@ -22,7 +26,18 @@ struct ContentView: View {
             .safeAreaInset(edge: .bottom, spacing: 0) { controls }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(isPresented: $showSettings) {
-                SettingsView(model: model, showOriginal: $showOriginal, largeCaptions: $largeCaptions)
+                SettingsView(model: model, showOriginal: $showOriginal, largeCaptions: $largeCaptions,
+                             highlightInformation: $highlightInformation)
+            }
+            .sheet(isPresented: $showCatchUp, onDismiss: { model.stopReplay() }) {
+                CatchUpView(model: model, highlightInformation: highlightInformation,
+                            requestReplay: { performReplay($0) })
+            }
+            .confirmationDialog("暂停实时听译并重播这句？", isPresented: $askReplay, titleVisibility: .visible) {
+                Button("暂停并重播") { performReplay(pendingReplayID) }
+                Button("取消", role: .cancel) { pendingReplayID = nil }
+            } message: {
+                Text("重播只播放已有译文，收音会暂停。结束后由你手动继续听译。")
             }
             .confirmationDialog("开始前，请让周围参与者知晓正在进行语音翻译。", isPresented: $askAwareness, titleVisibility: .visible) {
                 Button("已告知，开始听译") {
@@ -59,7 +74,7 @@ struct ContentView: View {
             HStack {
                 Text("耳边译").font(.system(size: 27, weight: .semibold))
                 Spacer()
-                Button { showSettings = true } label: {
+                Button { model.stopReplay(); showSettings = true } label: {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 18, weight: .medium))
                         .frame(width: 44, height: 44)
@@ -71,7 +86,7 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Text("\(model.source.name) → \(model.target.name)").foregroundStyle(accent)
                 Spacer(minLength: 4)
-                Label(model.isRunning ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
+                Label(model.isRunning || model.isReplaying ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
@@ -106,7 +121,11 @@ struct ContentView: View {
                     if model.captions.isEmpty && model.draft.isEmpty {
                         emptyState
                     } else {
-                        Text("实时字幕").font(.caption).foregroundStyle(.secondary)
+                        HStack {
+                            Text("实时字幕")
+                            Spacer()
+                            Text("轻点译文重播")
+                        }.font(.caption).foregroundStyle(.secondary)
                         ForEach(model.captions) { caption in
                             captionView(caption, latest: caption.id == model.captions.last?.id).id(caption.id)
                         }
@@ -143,13 +162,28 @@ struct ContentView: View {
             if latest || caption.status != .complete {
                 Text(caption.status.rawValue).font(.caption2).foregroundStyle(.secondary)
             }
-            Text(caption.translated.isEmpty ? "正在组织译文…" : caption.translated)
-                .font(.system(size: latest ? (largeCaptions ? 32 : 27) : (largeCaptions ? 23 : 19), weight: latest ? .medium : .regular))
-                .foregroundStyle(latest ? Color.primary : Color.secondary)
-                .lineSpacing(latest ? 6 : 4)
-                .textSelection(.enabled)
+            if model.canReplay(caption) {
+                Button { requestReplay(caption.id) } label: {
+                    translatedText(caption, latest: latest)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.isBusy)
+                .accessibilityLabel(model.replayingCaptionID == caption.id && model.isReplaying
+                                    ? "停止重播" : "重播译文：\(caption.translated)")
+                .accessibilityHint(model.isRunning ? "会先询问是否暂停实时听译" : "使用这条译文原有的语言播放")
+            } else {
+                translatedText(caption, latest: latest).textSelection(.enabled)
+            }
             if showOriginal {
-                Text(caption.original).font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+                HighlightedCaptionText(text: caption.original, enabled: highlightInformation)
+                    .equatable().font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if caption.replayStatus != .never {
+                Label(caption.replayStatus.rawValue,
+                      systemImage: model.replayingCaptionID == caption.id ? "speaker.wave.2.fill" : "arrow.counterclockwise")
+                    .font(.caption2).foregroundStyle(accent)
             }
             if caption.isProvisional {
                 Text("提前译出 · 可能修订").font(.caption2).foregroundStyle(.orange)
@@ -162,38 +196,59 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private func translatedText(_ caption: Caption, latest: Bool) -> some View {
+        HighlightedCaptionText(text: caption.translated.isEmpty ? "正在组织译文…" : caption.translated,
+                               enabled: highlightInformation && !caption.translated.isEmpty)
+            .equatable()
+            .font(.system(size: latest ? (largeCaptions ? 32 : 27) : (largeCaptions ? 23 : 19), weight: latest ? .medium : .regular))
+            .foregroundStyle(latest ? Color.primary : Color.secondary)
+            .lineSpacing(latest ? 6 : 4)
+    }
+
     private var controls: some View {
         VStack(spacing: 14) {
-            if model.pendingSpeechCount > 2 || model.skippedAudioCount > 0 {
+            if model.pendingSpeechCount > 2 || !model.unheardCaptions.isEmpty {
                 HStack {
-                    Text(model.skippedAudioCount > 0 ? "\(model.skippedAudioCount) 段仅字幕 / 未播完" : "译音正在追赶")
+                    Text(model.unheardCaptions.isEmpty ? "译音正在追赶" : "待补听 \(model.unheardCaptions.count) 段")
                         .font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    if model.isRunning { Button("跳到当前") { askSkip = true }.font(.caption) }
+                    if !model.unheardCaptions.isEmpty {
+                        Button("补听") { showCatchUp = true }.font(.caption)
+                    }
+                    if model.isRunning && model.pendingSpeechCount > 2 {
+                        Button("跳到当前") { askSkip = true }.font(.caption)
+                    }
                 }
             }
             HStack(spacing: 7) {
-                Image(systemName: model.isRunning ? "waveform" : "pause.circle")
-                    .foregroundStyle(model.isRunning ? accent : Color.secondary)
-                Text(model.isRunning ? "正在听译" : model.state.rawValue).font(.caption).foregroundStyle(.secondary)
+                Image(systemName: model.isReplaying ? "speaker.wave.2" : model.isRunning ? "waveform" : "pause.circle")
+                    .foregroundStyle(model.isRunning || model.isReplaying ? accent : Color.secondary)
+                Text(model.isReplaying ? "重播译文 · 收音已暂停" : model.isRunning ? "正在听译" : model.state.rawValue)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if !model.isRunning && !model.replayMessage.isEmpty {
+                Text(model.replayMessage).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 12) {
                 Button {
-                    if model.isRunning || model.isBusy {
+                    if model.isReplaying {
+                        model.stopReplay()
+                    } else if model.isRunning || model.isBusy {
                         startAfterPreparation = false
                         model.stop()
                     } else if !model.awarenessConfirmed {
                         askAwareness = true
                     } else { begin() }
                 } label: {
-                    Label(primaryTitle, systemImage: model.isRunning || model.isBusy ? "pause.fill" : "play.fill")
+                    Label(primaryTitle, systemImage: model.isReplaying ? "stop.fill" : model.isRunning || model.isBusy ? "pause.fill" : "play.fill")
                         .font(.headline)
                         .frame(maxWidth: .infinity, minHeight: 60)
                         .background(accent, in: RoundedRectangle(cornerRadius: 20))
                         .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
                 }
                 .buttonStyle(.plain)
-                if model.isRunning || model.isBusy || !model.captions.isEmpty {
+                if model.isRunning || model.isBusy || model.isReplaying || !model.captions.isEmpty {
                     Button {
                         startAfterPreparation = false
                         model.end()
@@ -214,6 +269,7 @@ struct ContentView: View {
     }
 
     private var primaryTitle: String {
+        if model.isReplaying { return "停止重播" }
         if model.isBusy { return "取消准备" }
         if model.isRunning { return "暂停听译" }
         return model.state == .paused ? "继续听译" : "开始听译"
@@ -224,12 +280,30 @@ struct ContentView: View {
     }
 
     private func begin() {
+        model.stopReplay()
         guard model.source != model.target else { showSettings = true; return }
         if model.resourcesReady { model.start() }
         else {
             startAfterPreparation = true
             model.requestPreparation()
         }
+    }
+
+    private func requestReplay(_ id: UUID) {
+        guard !model.isBusy else { return }
+        if model.isReplaying && model.replayingCaptionID == id {
+            model.stopReplay()
+        } else if model.isRunning {
+            pendingReplayID = id
+            askReplay = true
+        } else { performReplay(id) }
+    }
+
+    private func performReplay(_ id: UUID?) {
+        startAfterPreparation = false
+        if let id { model.replayCaption(id) }
+        else { model.replayUnheard() }
+        pendingReplayID = nil
     }
 
     private func continueAfterPreparationIfReady() {
