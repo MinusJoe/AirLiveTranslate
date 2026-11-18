@@ -66,6 +66,7 @@ struct SettingsView: View {
                 }.disabled(!model.canConfigure)
             }
             Section {
+                NavigationLink("会议纪要 · AI 模型") { MeetingModelSettings() }
                 DisclosureGroup("设备与处理状态") {
                     LabeledContent("麦克风权限", value: model.microphonePermission)
                     LabeledContent("输入", value: model.snapshot.inputName)
@@ -127,7 +128,7 @@ struct SettingsView: View {
                 Text("单耳静音不等于单耳通透。远场效果、译音回采、口音准确率及锁屏连续性需要在你的设备上验证。")
             }
             Section("隐私与资源") {
-                Text("首页保留最近 200 条字幕。会议纪要在内存中单独收录最多一万段定稿文字，可导出到你选择的位置。结束并查看的纪要在下次收音或退出 App 前可重新打开。AI 总结使用本机 Apple 智能。")
+                Text("首页保留最近 200 条字幕。会议纪要在内存中单独收录最多一万段定稿文字，可导出到你选择的位置。结束并查看的纪要在下次收音或退出 App 前可重新打开。Apple 智能在本机总结；选择自定义服务并确认后，定稿原文会发到所填地址。")
             }
         }
         .navigationTitle("使用说明")

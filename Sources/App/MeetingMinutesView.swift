@@ -5,6 +5,7 @@ struct MeetingSummaryResult {
     let meetingID: UUID
     let lineCount: Int
     let text: String
+    let provider: String
 }
 
 private struct MinutesTextFile: FileDocument {
@@ -24,6 +25,7 @@ struct MeetingMinutesView: View {
     let minutes: MeetingMinutes
     let listening: Bool
     @Binding var savedSummary: MeetingSummaryResult?
+    @EnvironmentObject private var preferences: MeetingModelPreferences
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @State private var unavailable = MeetingSummary.unavailableReason
@@ -32,6 +34,8 @@ struct MeetingMinutesView: View {
     @State private var notice = ""
     @State private var exporting = false
     @State private var document = MinutesTextFile("")
+    @State private var askSend = false
+    @State private var selectedRemote: MeetingConnection?
 
     private var summary: String? {
         guard savedSummary?.meetingID == minutes.id, savedSummary?.lineCount == minutes.lines.count else { return nil }
@@ -46,8 +50,13 @@ struct MeetingMinutesView: View {
                                            description: Text("开始听译后，已定稿的原文和已有译文会出现在这里。"))
                 } else {
                     Section("AI 总结") {
-                        if let summary { Text(summary).textSelection(.enabled) }
-                        if let unavailable {
+                        NavigationLink("模型设置 · " + preferences.provider.rawValue) { MeetingModelSettings() }
+                            .disabled(request != nil)
+                        if let summary {
+                            if let label = savedSummary?.provider { Text("生成来源 · " + label).font(.caption) }
+                            Text(summary).textSelection(.enabled)
+                        }
+                        if preferences.provider == .apple, let unavailable {
                             Text(unavailable).foregroundStyle(.secondary)
                             Button("重新检查本机模型") { self.unavailable = MeetingSummary.unavailableReason }
                         } else if listening {
@@ -55,7 +64,11 @@ struct MeetingMinutesView: View {
                         } else if request != nil {
                             HStack { ProgressView(); Text(progress); Spacer(); Button("取消") { request = nil } }
                         } else {
-                            Button(summary == nil ? "生成 AI 总结" : "重新生成") { notice = ""; request = UUID() }
+                            Button(summary == nil ? "生成 AI 总结" : "重新生成") {
+                                notice = ""
+                                selectedRemote = preferences.provider == .custom ? preferences.connection : nil
+                                if selectedRemote != nil { askSend = true } else { request = UUID() }
+                            }
                         }
                         if summary != nil { Text("方括号中的编号对应下方原文。请核对决定、负责人和日期。").font(.caption) }
                     }
@@ -88,6 +101,14 @@ struct MeetingMinutesView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }
+        .confirmationDialog("发送定稿原文并生成总结？", isPresented: $askSend, titleVisibility: .visible) {
+            Button("发送并生成") { request = UUID() }
+            Button("取消", role: .cancel) { selectedRemote = nil }
+        } message: {
+            if let config = selectedRemote {
+                Text("将把这 \(minutes.lines.count) 段文字分批发到 \(config.baseURL)，由 \(config.model) 处理。服务可能计费，并按其政策处理数据。")
+            }
+        }
         .fileExporter(isPresented: $exporting, document: document, contentType: .plainText,
                       defaultFilename: "会议纪要-" + (minutes.lines.first?.time ?? Date()).formatted(.iso8601.year().month().day())) { result in
             switch result {
@@ -98,13 +119,15 @@ struct MeetingMinutesView: View {
         .onChange(of: scenePhase) { _, phase in if phase == .active { unavailable = MeetingSummary.unavailableReason } }
         .task(id: request) {
             guard let token = request else { return }
+            let remote = selectedRemote
             do {
-                let text = try await MeetingSummary.generate(minutes) { index, total in
+                let text = try await MeetingSummary.generate(minutes, remote: remote) { index, total in
                     if request == token { progress = "正在整理 \(index) / \(total)" }
                 }
                 try Task.checkCancellation()
                 guard request == token else { return }
-                savedSummary = MeetingSummaryResult(meetingID: minutes.id, lineCount: minutes.lines.count, text: text)
+                savedSummary = MeetingSummaryResult(meetingID: minutes.id, lineCount: minutes.lines.count,
+                                                   text: text, provider: remote?.model ?? "Apple 智能")
             } catch {
                 guard !Task.isCancelled, request == token else { return }
                 unavailable = MeetingSummary.unavailableReason

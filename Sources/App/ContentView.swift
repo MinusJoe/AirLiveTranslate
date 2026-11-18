@@ -4,6 +4,7 @@ import Translation
 struct ContentView: View {
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var model = TranslationViewModel()
+    @StateObject private var meetingPreferences = MeetingModelPreferences()
     @State private var showSettings = false
     @State private var showOriginal = true
     @State private var largeCaptions = false
@@ -72,6 +73,7 @@ struct ContentView: View {
             }
         }
         .tint(accent)
+        .environmentObject(meetingPreferences)
         .translationTask(model.translationConfiguration) { session in
             await model.prepareResources(using: session)
         }
