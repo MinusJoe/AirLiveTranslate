@@ -82,6 +82,10 @@ final class TranslationViewModel: ObservableObject {
     private var replayTask: Task<Void, Never>?
     private var replayProgress = ReplayProgress()
     private var replayPlanIDs: [UUID] = []
+    private var audioOrigin = Date()
+    private var minutes = MeetingMinutes()
+    private var finishedMinutes: MeetingMinutes?
+    var readableMinutes: MeetingMinutes { minutes.lines.isEmpty ? (finishedMinutes ?? minutes) : minutes }
 
     var languageKey: String { "\(source.rawValue):\(sourceVariant.rawValue)>\(target.rawValue)" }
     var resourcesReady: Bool { preparedKey == languageKey }
@@ -272,6 +276,7 @@ final class TranslationViewModel: ObservableObject {
                 self.snapshot = try await self.audio.configure(source: requestedCapture, side: requestedSide)
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
+                self.audioOrigin = Date()
                 let capture = try self.audio.start(side: requestedSide, onLevel: { [weak self] level in
                     guard let self, self.epoch.accepts(token) else { return }
                     self.inputLevel = level
@@ -281,6 +286,7 @@ final class TranslationViewModel: ObservableObject {
                     self.stop(reason: reason, failed: true)
                 })
                 self.state = .buffering
+                self.finishedMinutes = nil
                 self.message = "可以讲话了。开头语音已开始在内存中暂存，识别就绪后会从头处理。"
                 let status = await LanguageAvailability().status(from: Locale.Language(identifier: requestedSource.rawValue),
                                                                 to: Locale.Language(identifier: requestedTarget.rawValue))
@@ -331,6 +337,7 @@ final class TranslationViewModel: ObservableObject {
         speechTask?.cancel()
         speechTask = nil
         translator?.cancel()
+        minutes.discardUnconfirmed()
         translator = nil
         audio.stop()
         cleanupTask = Task { [speech] in await speech.stop() }
@@ -350,8 +357,10 @@ final class TranslationViewModel: ObservableObject {
         message = reason
     }
 
-    func end() {
+    func end(keepMinutes: Bool = false) {
         stop(reason: "会话已结束，当前会话字幕已清空。", end: true)
+        finishedMinutes = keepMinutes ? minutes : nil
+        minutes = MeetingMinutes()
         captions.removeAll()
         skippedAudioCount = 0
         replayMessage = ""
@@ -359,6 +368,8 @@ final class TranslationViewModel: ObservableObject {
 
     func clearCaptions() {
         guard canConfigure else { return }
+        finishedMinutes = nil
+        minutes = MeetingMinutes()
         captions.removeAll()
         draft = ""
     }
@@ -517,6 +528,7 @@ final class TranslationViewModel: ObservableObject {
         }
         if draft != batch.draft { draft = batch.draft }
         guard !batch.segments.isEmpty || !batch.revisedIDs.isEmpty || !batch.confirmedIDs.isEmpty else { return }
+        minutes.ingest(batch, audioOrigin: audioOrigin)
         if !batch.revisedIDs.isEmpty { revoke(batch.revisedIDs, token: token) }
         for id in batch.confirmedIDs { update(id) { $0.isProvisional = false } }
         do {
@@ -601,6 +613,7 @@ final class TranslationViewModel: ObservableObject {
                     guard !text.isEmpty else { throw PipelineError.message("翻译未返回内容，已暂停。") }
                     let now = ProcessInfo.processInfo.systemUptime
                     self.latestMetrics.translationSeconds = now - began
+                    self.minutes.setTranslation(text, for: segment.id)
                     self.update(segment.id) {
                         $0.translated = text
                         $0.processingSeconds = now - segment.committedAtUptime

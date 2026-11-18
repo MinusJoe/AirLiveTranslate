@@ -102,7 +102,7 @@ struct SettingsView: View {
                 NavigationLink("使用说明") { usageHelp }
             }
             Section {
-                Text("本机处理，不保存录音。暂停保留当前字幕；结束会话时清空。")
+                Text("录音不落盘。暂停保留当前字幕，会议纪要可在结束时查看和导出。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }
@@ -127,7 +127,7 @@ struct SettingsView: View {
                 Text("单耳静音不等于单耳通透。远场效果、译音回采、口音准确率及锁屏连续性需要在你的设备上验证。")
             }
             Section("隐私与资源") {
-                Text("录音不落盘，字幕只在当前会话内存中保存最近 200 条。结束后清空。首次准备语言模型需要联网，系统服务可能按 Apple 政策收集使用与性能指标。")
+                Text("首页保留最近 200 条字幕。会议纪要在内存中单独收录最多一万段定稿文字，可导出到你选择的位置。结束并查看的纪要在下次收音或退出 App 前可重新打开。AI 总结使用本机 Apple 智能。")
             }
         }
         .navigationTitle("使用说明")

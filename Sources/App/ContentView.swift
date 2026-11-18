@@ -9,6 +9,9 @@ struct ContentView: View {
     @State private var largeCaptions = false
     @State private var highlightInformation = true
     @State private var showCatchUp = false
+    @State private var meetingSheet: MeetingMinutes?
+    @State private var savedSummary: MeetingSummaryResult?
+    @State private var askEnd = false
     @State private var askReplay = false
     @State private var pendingReplayID: UUID?
     @State private var askAwareness = false
@@ -33,6 +36,19 @@ struct ContentView: View {
                 CatchUpView(model: model, highlightInformation: highlightInformation,
                             requestReplay: { performReplay($0) })
             }
+            .sheet(item: $meetingSheet) { meeting in
+                MeetingMinutesView(minutes: meeting, listening: model.isRunning || model.isBusy, savedSummary: $savedSummary)
+            }
+            .confirmationDialog("结束这次听译？", isPresented: $askEnd, titleVisibility: .visible) {
+                Button("结束并查看会议纪要") {
+                    model.end(keepMinutes: true)
+                    meetingSheet = model.readableMinutes
+                }
+                Button("结束并清空", role: .destructive) { savedSummary = nil; model.end() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("纪要收录已定稿内容。需要留存时，请在纪要页导出。")
+            }
             .confirmationDialog("暂停实时听译并重播这句？", isPresented: $askReplay, titleVisibility: .visible) {
                 Button("暂停并重播") { performReplay(pendingReplayID) }
                 Button("取消", role: .cancel) { pendingReplayID = nil }
@@ -46,7 +62,7 @@ struct ContentView: View {
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("在设备端处理，不保存录音；结束会话时清空字幕。")
+                Text("在设备端处理，录音不落盘。已定稿的文字可以导出为会议纪要。")
             }
             .confirmationDialog("跳到当前讲话？", isPresented: $askSkip, titleVisibility: .visible) {
                 Button("跳到当前") { model.skipToLive() }
@@ -66,6 +82,7 @@ struct ContentView: View {
         .onChange(of: model.state) { _, state in
             if state == .failed || state == .paused { startAfterPreparation = false }
             else if state == .idle { continueAfterPreparationIfReady() }
+            if state == .buffering, savedSummary?.meetingID != model.readableMinutes.id { savedSummary = nil }
         }
     }
 
@@ -74,6 +91,11 @@ struct ContentView: View {
             HStack {
                 Text("耳边译").font(.system(size: 27, weight: .semibold))
                 Spacer()
+                Button { meetingSheet = model.readableMinutes } label: {
+                    Image(systemName: "doc.text").frame(width: 44, height: 44)
+                }
+                .foregroundStyle(.primary)
+                .accessibilityLabel("会议纪要")
                 Button { model.stopReplay(); showSettings = true } label: {
                     Image(systemName: "slider.horizontal.3")
                         .font(.system(size: 18, weight: .medium))
@@ -251,7 +273,8 @@ struct ContentView: View {
                 if model.isRunning || model.isBusy || model.isReplaying || !model.captions.isEmpty {
                     Button {
                         startAfterPreparation = false
-                        model.end()
+                        if model.readableMinutes.lines.isEmpty { savedSummary = nil; model.end() }
+                        else { askEnd = true }
                     } label: {
                         Text("结束").font(.subheadline)
                             .frame(width: 58, height: 60)
