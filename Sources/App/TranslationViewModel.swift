@@ -244,7 +244,7 @@ final class TranslationViewModel: ObservableObject {
         state = .starting
         message = "正在连接麦克风。看到“已收音”后即可讲话。"
         draft = ""
-        committer = StreamingCommitter(lowLatencyEnabled: requestedLowLatency)
+        committer = StreamingCommitter(lowLatencyEnabled: requestedLowLatency, language: requestedSource)
         queue.removeAll()
         _ = speechQueue.removeAll()
         invalidatedIDs.removeAll()
@@ -307,7 +307,7 @@ final class TranslationViewModel: ObservableObject {
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
                 self.state = .listening
-                self.phase = requestedLowLatency ? "低延迟听译：稳定完整句可提前提交，修订会明确提示。" : "稳健听译：等待系统最终片段。"
+                self.phase = requestedLowLatency ? "正在听译，稳定的句子或分句可以先播。" : "正在听译，等待识别定稿。"
                 self.message = "收音与处理仅在本机进行。已配置锁屏音频，实际连续性待真机验证；来电或路由变化会暂停。"
             } catch {
                 guard self.epoch.accepts(token), !Task.isCancelled else { return }

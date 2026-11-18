@@ -27,10 +27,11 @@ struct CommitBatch: Sendable {
     var draft = ""
 }
 
-/// An experimental conservative policy: only time-stable complete sentences can be speculative.
+/// Stable sentences and independently translatable clauses may be speculative.
 /// Final text is authoritative. A changed speculative prefix becomes an explicit subtitle correction.
 struct StreamingCommitter {
     let lowLatencyEnabled: Bool
+    let language: AppLanguage
     let stabilitySeconds: TimeInterval
     let confirmations: Int
     private var finalizedThrough: Double = -.infinity
@@ -44,8 +45,10 @@ struct StreamingCommitter {
     private var candidateCount = 0
     var pendingIDs: [UUID] { committedIDs }
 
-    init(lowLatencyEnabled: Bool = true, stabilitySeconds: TimeInterval = 0.45, confirmations: Int = 3) {
+    init(lowLatencyEnabled: Bool = true, language: AppLanguage = .english,
+         stabilitySeconds: TimeInterval = 0.45, confirmations: Int = 3) {
         self.lowLatencyEnabled = lowLatencyEnabled
+        self.language = language
         self.stabilitySeconds = stabilitySeconds
         self.confirmations = confirmations
     }
@@ -74,8 +77,8 @@ struct StreamingCommitter {
 
         if update.isFinal {
             let finalText = revisionSeen ? update.text : String(update.text.dropFirst(committedPrefix.count))
-            let text = finalText.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !text.isEmpty {
+            let text = ClauseBoundary.fragment(finalText)
+            if text.contains(where: { !$0.isWhitespace && !$0.isPunctuation }) {
                 let start = revisionSeen ? update.start : max(update.start, committedThrough)
                 if update.end > start {
                     batch.segments.append(CommittedSegment(
@@ -94,8 +97,15 @@ struct StreamingCommitter {
         let characters = Array(update.text)
         let committedCount = committedPrefix.count
         guard committedCount <= characters.count else { return batch }
-        batch.draft = String(characters.dropFirst(committedCount)).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let boundary = sentenceBoundary(in: characters, after: committedCount) else {
+        batch.draft = ClauseBoundary.fragment(String(characters.dropFirst(committedCount)))
+        let sentence = sentenceBoundary(in: characters, after: committedCount)
+        let clause = ClauseBoundary.candidates(in: characters, after: committedCount, language: language).first { offset in
+            guard offset < (sentence ?? Int.max),
+                  let time = reliableEnd(at: offset, text: characters, boundaries: update.boundaries)
+            else { return false }
+            return time > max(update.start, committedThrough) && update.end - time >= 0.30
+        }
+        guard let boundary = clause ?? sentence else {
             candidate = ""
             candidateCount = 0
             return batch
@@ -111,7 +121,7 @@ struct StreamingCommitter {
         guard candidateCount >= confirmations, now - candidateSince >= stabilitySeconds,
               let audioEnd = reliableEnd(at: boundary, text: characters, boundaries: update.boundaries),
               audioEnd > max(update.start, committedThrough), update.end - audioEnd >= 0.15 else { return batch }
-        let segment = SpeechSegment(text: prefix.trimmingCharacters(in: .whitespacesAndNewlines),
+        let segment = SpeechSegment(text: ClauseBoundary.fragment(prefix),
                                     start: max(update.start, committedThrough), end: audioEnd, committedAtUptime: now)
         batch.segments.append(CommittedSegment(segment: segment, isProvisional: true, subtitleOnly: false))
         committedIDs.append(segment.id)
@@ -119,7 +129,7 @@ struct StreamingCommitter {
         committedThrough = audioEnd
         candidate = ""
         candidateCount = 0
-        batch.draft = String(characters.dropFirst(boundary)).trimmingCharacters(in: .whitespacesAndNewlines)
+        batch.draft = ClauseBoundary.fragment(String(characters.dropFirst(boundary)))
         return batch
     }
 
@@ -155,8 +165,12 @@ struct StreamingCommitter {
     private func reliableEnd(at offset: Int, text: [Character], boundaries: [TextAudioBoundary]) -> Double? {
         // Punctuation can have no timing attribute; allow only punctuation/whitespace after a timed run.
         let eligible = boundaries.filter { boundary in
-            guard boundary.characterOffset > 0, boundary.characterOffset <= offset,
+            guard boundary.characterOffset > 0,
                   boundary.characterOffset <= text.count, boundary.audioEnd.isFinite else { return false }
+            if boundary.characterOffset > offset {
+                // Timed words may include following whitespace. Never borrow timing from the next word.
+                return text[offset..<boundary.characterOffset].allSatisfy(\.isWhitespace)
+            }
             return text[boundary.characterOffset..<offset].allSatisfy { $0.isWhitespace || $0.isPunctuation }
         }
         return eligible.max(by: { $0.characterOffset < $1.characterOffset })?.audioEnd

@@ -54,7 +54,7 @@ struct SettingsView: View {
                 Toggle("快速响应", isOn: $model.lowLatencyEnabled).disabled(!model.canConfigure)
                 Toggle("播报跟随语速", isOn: $model.adaptiveRateEnabled).disabled(!model.canConfigure)
             } header: { Text("听译") } footer: {
-                Text("快速响应更早处理稳定短句，可能增加识别修订；关闭后优先稳健并等待最终结果。播报追赶有上限，未播出的内容会保留字幕并标记。")
+                Text("开启后，听到明确的下一分句时可先播前半句。语义尚未明确时会继续听。关闭后等识别定稿再播。")
             }
             Section("字幕与声音") {
                 Toggle("显示原文", isOn: $showOriginal)
