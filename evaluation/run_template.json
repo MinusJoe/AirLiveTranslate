@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "status": "not_run",
+  "run_id": null,
+  "commit": null,
+  "baseline_or_candidate": null,
+  "build_run_url": null,
+  "device": {"iphone": null, "ios": null, "airpods": null, "firmware": null},
+  "configuration": {"source_language": null, "target_language": null, "requested_locale": null, "actual_locale": null, "submission_policy": null, "capture_route": null, "far_field_supported": null, "far_field_enabled": null, "output_side": null, "tts_rate": null},
+  "material": {"prompt_id": null, "speaker_id": null, "self_described_accent": null, "first_language_optional": null, "speed_condition": null, "actual_rate": null, "rate_unit": null, "audio_path": null, "reference_transcript": null, "recording_processing": null},
+  "environment": {"test_type": null, "distance_m": null, "direction": null, "noise_condition": null, "phone_placement": null, "cold_or_warm": null, "take": null},
+  "segments": [],
+  "segment_schema_example_do_not_count_as_result": {"segment_id": null, "source_start_ms": null, "source_end_ms": null, "first_partial_ms": null, "commit_ms": null, "translation_start_ms": null, "translation_end_ms": null, "tts_ready_ms": null, "audible_start_ms": null, "audible_end_ms": null, "revision_ms": null, "original_text": null, "revised_text": null, "translated_text": null, "commit_kind": null, "playback_status": null, "skip_reason": null, "revision_visible": null},
+  "quality": {"reference_units": null, "substitutions": null, "deletions": null, "insertions": null, "error_metric": null, "error_rate": null, "meaning_checks_total": null, "meaning_checks_failed": null, "critical_error_notes": null, "early_commits": null, "revised_commits": null, "played_segments": null, "skipped_segments": null, "failed_segments": null, "duplicate_playbacks": null},
+  "notes": "Empty template only. No audio, measurements, or recognition results have been collected."
+}

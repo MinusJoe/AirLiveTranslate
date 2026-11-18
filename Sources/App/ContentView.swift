@@ -1,253 +1,363 @@
-import AVKit
 import SwiftUI
 import Translation
 
 struct ContentView: View {
+    @Environment(\.colorScheme) private var colorScheme
     @StateObject private var model = TranslationViewModel()
-    @State private var showHelp = false
+    @StateObject private var meetingPreferences = MeetingModelPreferences()
+    @State private var showSettings = false
+    @State private var showOriginal = true
+    @State private var largeCaptions = false
+    @State private var highlightInformation = true
+    @State private var showCatchUp = false
+    @State private var meetingSheet: MeetingMinutes?
+    @State private var savedSummary: MeetingSummaryResult?
+    @State private var askEnd = false
+    @State private var askReplay = false
+    @State private var pendingReplayID: UUID?
+    @State private var askAwareness = false
+    @State private var askSkip = false
+    @State private var showConversation = false
+    @State private var partnerToHear: AppLanguage?
+    @State private var startAfterPreparation = false
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    statusCard
-                    settingsCard
-                    controls
-                    transcript
-                }
-                .padding()
+            VStack(spacing: 0) {
+                header
+                if model.isBusy || model.state == .failed { statusNotice }
+                transcript
             }
-            .background(Color(.systemGroupedBackground))
-            .navigationTitle("耳边译")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button { showHelp = true } label: { Image(systemName: "questionmark.circle") }
-                        .accessibilityLabel("佩戴与使用说明")
-                }
+            .background(Color(.systemBackground))
+            .safeAreaInset(edge: .bottom, spacing: 0) { controls }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(isPresented: $showSettings) {
+                SettingsView(model: model, showOriginal: $showOriginal, largeCaptions: $largeCaptions,
+                             highlightInformation: $highlightInformation)
             }
-            .sheet(isPresented: $showHelp) { helpSheet }
-            .translationTask(model.translationConfiguration) { session in
-                await model.prepareResources(using: session)
+            .sheet(isPresented: $showCatchUp, onDismiss: { model.stopReplay() }) {
+                CatchUpView(model: model, highlightInformation: highlightInformation,
+                            requestReplay: { performReplay($0) })
+            }
+            .sheet(item: $meetingSheet) { meeting in
+                MeetingMinutesView(minutes: meeting, listening: model.isRunning || model.isBusy, savedSummary: $savedSummary)
+            }
+            .sheet(isPresented: $showConversation, onDismiss: startPartnerTurn) {
+                ConversationView(language: ConversationTurn.partnerLanguage(source: model.source, target: model.target),
+                                 source: model.captureSource,
+                                 chineseVariant: model.sourceVariant.language == .chinese ? model.sourceVariant : .chineseMainland,
+                                 rate: Float(model.speakingRate)) { partnerToHear = $0 }
+            }
+            .confirmationDialog("结束这次听译？", isPresented: $askEnd, titleVisibility: .visible) {
+                Button("结束并查看会议纪要") {
+                    model.end(keepMinutes: true)
+                    meetingSheet = model.readableMinutes
+                }
+                Button("结束并清空", role: .destructive) { savedSummary = nil; model.end() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("纪要收录已定稿内容。需要留存时，请在纪要页导出。")
+            }
+            .confirmationDialog("暂停实时听译并重播这句？", isPresented: $askReplay, titleVisibility: .visible) {
+                Button("暂停并重播") { performReplay(pendingReplayID) }
+                Button("取消", role: .cancel) { pendingReplayID = nil }
+            } message: {
+                Text("重播只播放已有译文，收音会暂停。结束后由你手动继续听译。")
+            }
+            .confirmationDialog("开始前，请让周围参与者知晓正在进行语音翻译。", isPresented: $askAwareness, titleVisibility: .visible) {
+                Button("已告知，开始听译") {
+                    model.awarenessConfirmed = true
+                    begin()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("在设备端处理，录音不落盘。已定稿的文字可以导出为会议纪要。")
+            }
+            .confirmationDialog("跳到当前讲话？", isPresented: $askSkip, titleVisibility: .visible) {
+                Button("跳到当前") { model.skipToLive() }
+                Button("继续按顺序听", role: .cancel) {}
+            } message: {
+                Text("停止当前及等待中的旧译音，相关字幕会标记未播完。")
             }
         }
-        .tint(.teal)
-    }
-
-    private var statusCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: model.isRunning ? "waveform" : "earbuds")
-                    .font(.title2)
-                    .foregroundStyle(.teal)
-                Text(model.state.rawValue).font(.headline)
-                Spacer()
-                Text("设备端处理").font(.caption).foregroundStyle(.secondary)
-            }
-            Text(model.message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
-            if !model.phase.isEmpty {
-                Text(model.phase).font(.caption).foregroundStyle(.secondary)
-            }
-            if model.pendingCount > 0 {
-                Text("等待处理：\(model.pendingCount) 个片段").font(.caption).foregroundStyle(.orange)
-            }
-            if model.isRunning {
-                Label("麦克风正在使用", systemImage: "mic.fill").font(.caption).foregroundStyle(.orange)
-                ProgressView(value: Double(model.inputLevel))
-                    .tint(.teal)
-                    .accessibilityLabel("麦克风输入电平")
-                    .accessibilityValue("\(Int(model.inputLevel * 100))%")
-            }
+        .tint(accent)
+        .environmentObject(meetingPreferences)
+        .translationTask(model.translationConfiguration) { session in
+            await model.prepareResources(using: session)
         }
-        .padding()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.background, in: RoundedRectangle(cornerRadius: 20))
+        .task { await model.refreshVariants() }
+        .onChange(of: model.resourcesReady) { _, ready in
+            if ready { continueAfterPreparationIfReady() }
+        }
+        .onChange(of: model.state) { _, state in
+            if state == .failed || state == .paused { startAfterPreparation = false }
+            else if state == .idle { continueAfterPreparationIfReady() }
+            if state == .buffering, savedSummary?.meetingID != model.readableMinutes.id { savedSummary = nil }
+        }
     }
 
-    private var settingsCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private var header: some View {
+        VStack(spacing: 16) {
             HStack {
-                languagePicker("对方说", selection: $model.source)
-                Image(systemName: "arrow.right").foregroundStyle(.secondary)
-                languagePicker("我听", selection: $model.target)
-            }
-            .disabled(!model.canConfigure)
-
-            Button(model.resourcesReady ? "语言已准备 · 重新检查" : "准备语言资源") { model.requestPreparation() }
-                .buttonStyle(.bordered)
-                .disabled(!model.canConfigure || model.source == model.target)
-
-            Divider()
-            Picker("收音", selection: $model.captureSource) {
-                ForEach(CaptureSource.allCases) { Text($0.name).tag($0) }
-            }
-            .disabled(!model.canConfigure)
-            HStack {
-                Button("检查音频") { model.checkAudio() }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.canConfigure)
+                Text("耳边译").font(.system(size: 27, weight: .semibold))
                 Spacer()
-                Text("系统输出").font(.caption).foregroundStyle(.secondary)
-                AudioRoutePicker().frame(width: 36, height: 36)
-                    .accessibilityLabel("选择系统音频输出")
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                Text(model.isRunning ? "本次启动检查结果" : "上次检查结果（当前未收音）")
-                    .fontWeight(.medium)
-                Text("麦克风权限：\(model.microphonePermission)")
-                Text("输入：\(model.snapshot.inputName)")
-                Text("输出：\(model.snapshot.outputName)")
-                if model.captureSource == .headset {
-                    Text("远场：\(model.snapshot.hasBeenChecked ? (model.snapshot.farFieldSupported ? "支持" : "不支持") : "尚未检测") · 检查时启用：\(model.snapshot.farFieldEnabled ? "是" : "否")")
+                Button { meetingSheet = model.readableMinutes } label: {
+                    Image(systemName: "doc.text").frame(width: 44, height: 44)
                 }
-                Text(model.snapshot.detail)
+                .foregroundStyle(.primary)
+                .accessibilityLabel("会议纪要")
+                Button { model.stopReplay(); showSettings = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 18, weight: .medium))
+                        .frame(width: 44, height: 44)
+                        .background(Color(.secondarySystemBackground), in: Circle())
+                }
+                .foregroundStyle(.primary)
+                .accessibilityLabel("打开设置")
+            }
+            HStack(spacing: 8) {
+                Text("\(model.source.name) → \(model.target.name)").foregroundStyle(accent)
+                Button("面对面对话") {
+                    startAfterPreparation = false
+                    if model.isRunning || model.isBusy || model.isReplaying {
+                        model.stop(reason: "实时听译已暂停，可以说中文回复。")
+                    }
+                    showConversation = true
+                }.buttonStyle(.bordered).controlSize(.small)
+                Spacer(minLength: 4)
+                Label(model.microphoneActive || model.isReplaying ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
+                    .foregroundStyle(.secondary)
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
-
-            Text("译文播放").font(.subheadline)
-            HStack {
-                ForEach(OutputSide.allCases) { side in
-                    Button {
-                        model.outputSide = side
-                    } label: {
-                        HStack(spacing: 4) {
-                            if model.outputSide == side { Image(systemName: "checkmark") }
-                            Text(side.name)
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!model.canConfigure || (side != .both && !model.snapshot.output.supportsSingleEar))
-                    .accessibilityAddTraits(model.outputSide == side ? [.isSelected] : [])
-                }
-            }
-            Text("单耳选项仅在实际路由提供独立左右声道时开放。固定收音侧请到 AirPods 系统设置操作；远场模式的物理麦克风分工无法保证。")
-                .font(.caption).foregroundStyle(.secondary)
-
-            HStack {
-                Text("播报速度").font(.subheadline)
-                Slider(value: $model.speakingRate, in: 0.35...0.6)
-                    .accessibilityLabel("播报速度")
-            }
-            .disabled(!model.canConfigure)
-            Toggle("周围参与者已知晓正在进行语音翻译", isOn: $model.awarenessConfirmed)
-                .font(.caption)
-                .disabled(!model.canConfigure)
+            Divider()
         }
-        .padding()
-        .background(.background, in: RoundedRectangle(cornerRadius: 20))
+        .padding(.horizontal, 24)
+        .padding(.top, 12)
     }
 
-    private func languagePicker(_ title: String, selection: Binding<AppLanguage>) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Picker(title, selection: selection) {
-                ForEach(AppLanguage.allCases) { Text($0.name).tag($0) }
-            }
-            .labelsHidden()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var controls: some View {
-        HStack(spacing: 12) {
-            if model.isRunning || model.isBusy {
-                Button { model.stop() } label: {
-                    Label(model.isBusy ? "取消" : "暂停", systemImage: "pause.fill")
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
+    private var statusNotice: some View {
+        HStack(alignment: .top, spacing: 10) {
+            if model.isBusy { ProgressView().controlSize(.small) }
+            else { Image(systemName: "exclamationmark.circle").foregroundStyle(.orange) }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.message).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                if model.state == .failed {
+                    Button("查看设置") { showSettings = true }.font(.caption)
                 }
-                .buttonStyle(.borderedProminent)
-            } else {
-                Button { model.start() } label: {
-                    Label(model.state == .paused ? "恢复听译" : "开始听译", systemImage: "play.fill")
-                        .frame(maxWidth: .infinity).padding(.vertical, 8)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.resourcesReady || !model.awarenessConfirmed || model.source == model.target)
             }
-            Button("结束") { model.end() }.buttonStyle(.bordered)
-                .disabled(model.state == .idle && model.captions.isEmpty)
+            Spacer(minLength: 0)
         }
+        .padding(14)
+        .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14))
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
     }
 
     private var transcript: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("实时字幕").font(.headline)
-                Spacer()
-                Button("清空") { model.clearCaptions() }.font(.caption)
-                    .disabled(!model.canConfigure || model.captions.isEmpty)
-            }
-            Text("仅保留内存中最近 200 条。未确定文字会更新，确定后才翻译播报。")
-                .font(.caption).foregroundStyle(.secondary)
-            if !model.draft.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("识别中 · 尚未播报").font(.caption).foregroundStyle(.secondary)
-                    Text(model.draft).foregroundStyle(.secondary)
-                }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
-            }
-            if model.captions.isEmpty && model.draft.isEmpty {
-                ContentUnavailableView("等待讲话", systemImage: "text.bubble",
-                                       description: Text("开始后，对方的原文和译文会出现在这里。"))
-            }
-            ForEach(model.captions.reversed()) { caption in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(caption.translated.isEmpty ? "等待译文…" : caption.translated)
-                        .font(.title3).fontWeight(.medium)
-                    Text(caption.original).font(.subheadline).foregroundStyle(.secondary)
-                    HStack {
-                        Text(caption.status.rawValue)
-                        Spacer()
-                        if let seconds = caption.processingSeconds {
-                            Text("文本处理 \(seconds, specifier: "%.1f") 秒")
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 24) {
+                    if model.captions.isEmpty && model.draft.isEmpty {
+                        emptyState
+                    } else {
+                        HStack {
+                            Text("实时字幕")
+                            Spacer()
+                            Text("轻点译文重播")
+                        }.font(.caption).foregroundStyle(.secondary)
+                        ForEach(model.captions) { caption in
+                            captionView(caption, latest: caption.id == model.captions.last?.id).id(caption.id)
+                        }
+                        if !model.draft.isEmpty {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("识别中 · 文字可能修订").font(.caption2).foregroundStyle(.secondary)
+                                if showOriginal { Text(model.draft).font(.subheadline).foregroundStyle(.secondary) }
+                            }
                         }
                     }
-                    .font(.caption2).foregroundStyle(.secondary)
+                    Color.clear.frame(height: 1).id("transcript-bottom")
                 }
-                .padding()
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(.background, in: RoundedRectangle(cornerRadius: 14))
+                .padding(.horizontal, 24)
+                .padding(.vertical, 27)
             }
+            .onChange(of: model.captions.count) { _, _ in proxy.scrollTo("transcript-bottom", anchor: .bottom) }
+            .onChange(of: model.captions.last?.translated) { _, _ in proxy.scrollTo("transcript-bottom", anchor: .bottom) }
         }
     }
 
-    private var helpSheet: some View {
-        NavigationStack {
-            List {
-                Section("双耳佩戴") {
-                    Text("连接同一副 AirPods，双方知情后开始。先测试约 1 米处单人讲话，再测试远距离和噪声。")
-                    Text("耳机远场收音需要 iOS 26.2+ 且耳机路由实际支持。iOS 26.0/26.1 可主动选择手机麦克风。")
-                    Text("如需固定左或右麦克风，请打开系统设置 → AirPods → 麦克风。此 App 无法直接控制左右物理麦克风，也无法保证该设置在远场处理中如何生效。")
+    private var emptyState: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "waveform").font(.system(size: 34)).foregroundStyle(accent)
+            Text(model.microphoneActive ? "正在听，请自然讲话" : "听懂，就从这里开始").font(.title3).fontWeight(.medium)
+            Text(model.microphoneActive ? "原文与译文会显示在这里" : "戴好耳机，轻点开始")
+                .font(.subheadline).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 90)
+    }
+
+    private func captionView(_ caption: Caption, latest: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if latest || caption.status != .complete {
+                Text(caption.status.rawValue).font(.caption2).foregroundStyle(.secondary)
+            }
+            if model.canReplay(caption) {
+                Button { requestReplay(caption.id) } label: {
+                    translatedText(caption, latest: latest)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contentShape(Rectangle())
                 }
-                Section("播放与连续听译") {
-                    Text("单耳播放依赖实际左右声道。关闭系统单声道音频后重新检查；无法确认时请主动选双耳。单耳不播放译文并不等于该耳自动处于通透模式。")
-                    Text("本版本按系统确定的语义片段连续翻译。长句可能等待更久，并非零延迟同声传译。多人重叠讲话和译文串音需要真机评估。")
-                    Text("暂停会丢弃尚未播完的音频，并把对应字幕标为未播完；结束会清空字幕。恢复只处理新的讲话。来电或耳机变化后需要手动恢复。")
-                }
-                Section("数据") {
-                    Text("音频、识别、翻译与合成在设备端处理；本 App 不保存录音，不上传对话，不将字幕写入文件。语言模型首次下载需要联网。")
-                    Text("字幕仅保留内存中最近 200 条。暂停会保留字幕；结束会话、清空或结束 App 进程后无法恢复。系统语言服务可能按 Apple 的政策收集使用与性能指标。")
-                }
-                Section("版本状态") {
-                    Text("实验 MVP。设备能力检测不是远场效果或单耳物理听感的验收证明，请按项目验收清单测试。")
+                .buttonStyle(.plain)
+                .disabled(model.isBusy)
+                .accessibilityLabel(model.replayingCaptionID == caption.id && model.isReplaying
+                                    ? "停止重播" : "重播译文：\(caption.translated)")
+                .accessibilityHint(model.isRunning ? "会先询问是否暂停实时听译" : "使用这条译文原有的语言播放")
+            } else {
+                translatedText(caption, latest: latest).textSelection(.enabled)
+            }
+            if showOriginal {
+                HighlightedCaptionText(text: caption.original, enabled: highlightInformation)
+                    .equatable().font(.subheadline).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            if caption.replayStatus != .never {
+                Label(caption.replayStatus.rawValue,
+                      systemImage: model.replayingCaptionID == caption.id ? "speaker.wave.2.fill" : "arrow.counterclockwise")
+                    .font(.caption2).foregroundStyle(accent)
+            }
+            if caption.isProvisional {
+                Text("提前译出 · 可能修订").font(.caption2).foregroundStyle(.orange)
+            }
+            if let note = caption.note, !note.isEmpty {
+                Text(note).font(.caption).foregroundStyle(.orange)
+            }
+            if !latest { Divider().padding(.top, 14) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func translatedText(_ caption: Caption, latest: Bool) -> some View {
+        HighlightedCaptionText(text: caption.translated.isEmpty ? "正在组织译文…" : caption.translated,
+                               enabled: highlightInformation && !caption.translated.isEmpty)
+            .equatable()
+            .font(.system(size: latest ? (largeCaptions ? 32 : 27) : (largeCaptions ? 23 : 19), weight: latest ? .medium : .regular))
+            .foregroundStyle(latest ? Color.primary : Color.secondary)
+            .lineSpacing(latest ? 6 : 4)
+    }
+
+    private var controls: some View {
+        VStack(spacing: 14) {
+            if model.pendingSpeechCount > 2 || !model.unheardCaptions.isEmpty {
+                HStack {
+                    Text(model.unheardCaptions.isEmpty ? "译音正在追赶" : "待补听 \(model.unheardCaptions.count) 段")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    if !model.unheardCaptions.isEmpty {
+                        Button("补听") { showCatchUp = true }.font(.caption)
+                    }
+                    if model.isRunning && model.pendingSpeechCount > 2 {
+                        Button("跳到当前") { askSkip = true }.font(.caption)
+                    }
                 }
             }
-            .navigationTitle("使用说明")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { showHelp = false } } }
+            HStack(spacing: 7) {
+                Image(systemName: model.isReplaying ? "speaker.wave.2" : model.microphoneActive ? "waveform" : "pause.circle")
+                    .foregroundStyle(model.microphoneActive || model.isReplaying ? accent : Color.secondary)
+                Text(model.isReplaying ? "重播译文 · 收音已暂停" : model.isRunning ? "正在听译" : model.state.rawValue)
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if !model.isRunning && !model.replayMessage.isEmpty {
+                Text(model.replayMessage).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 12) {
+                Button {
+                    if model.isReplaying {
+                        model.stopReplay()
+                    } else if model.isRunning || model.isBusy {
+                        startAfterPreparation = false
+                        model.stop()
+                    } else if !model.awarenessConfirmed {
+                        askAwareness = true
+                    } else { begin() }
+                } label: {
+                    Label(primaryTitle, systemImage: model.isReplaying ? "stop.fill" : model.isRunning || model.isBusy ? "pause.fill" : "play.fill")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 60)
+                        .background(accent, in: RoundedRectangle(cornerRadius: 20))
+                        .foregroundStyle(colorScheme == .dark ? Color.black : Color.white)
+                }
+                .buttonStyle(.plain)
+                if model.isRunning || model.isBusy || model.isReplaying || !model.captions.isEmpty {
+                    Button {
+                        startAfterPreparation = false
+                        if model.readableMinutes.lines.isEmpty { savedSummary = nil; model.end() }
+                        else { askEnd = true }
+                    } label: {
+                        Text("结束").font(.subheadline)
+                            .frame(width: 58, height: 60)
+                            .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 19))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
+        .padding(.bottom, 16)
+        .background(Color(.systemBackground))
+    }
+
+    private var primaryTitle: String {
+        if model.isReplaying { return "停止重播" }
+        if model.state == .buffering { return "暂停收音" }
+        if model.isBusy { return "取消准备" }
+        if model.isRunning { return "暂停听译" }
+        return model.state == .paused ? "继续听译" : "开始听译"
+    }
+
+    private var accent: Color {
+        colorScheme == .dark ? Color(red: 0.43, green: 0.84, blue: 0.81) : Color(red: 0.03, green: 0.50, blue: 0.51)
+    }
+
+    private func startPartnerTurn() {
+        guard let language = partnerToHear else { return }
+        partnerToHear = nil
+        if model.source != language { model.source = language }
+        if model.target != .chinese { model.target = .chinese }
+        if model.awarenessConfirmed { begin() } else { askAwareness = true }
+    }
+
+    private func begin() {
+        model.stopReplay()
+        guard model.source != model.target else { showSettings = true; return }
+        if model.resourcesReady { model.start() }
+        else {
+            startAfterPreparation = true
+            model.requestPreparation(forListening: true)
         }
     }
-}
 
-private struct AudioRoutePicker: UIViewRepresentable {
-    func makeUIView(context: Context) -> AVRoutePickerView {
-        let view = AVRoutePickerView()
-        view.tintColor = .systemTeal
-        view.activeTintColor = .systemTeal
-        view.prioritizesVideoDevices = false
-        return view
+    private func requestReplay(_ id: UUID) {
+        guard !model.isBusy else { return }
+        if model.isReplaying && model.replayingCaptionID == id {
+            model.stopReplay()
+        } else if model.isRunning {
+            pendingReplayID = id
+            askReplay = true
+        } else { performReplay(id) }
     }
-    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
+
+    private func performReplay(_ id: UUID?) {
+        startAfterPreparation = false
+        if let id { model.replayCaption(id) }
+        else { model.replayUnheard() }
+        pendingReplayID = nil
+    }
+
+    private func continueAfterPreparationIfReady() {
+        guard startAfterPreparation, model.resourcesReady, model.state == .idle else { return }
+        startAfterPreparation = false
+        model.start()
+    }
 }

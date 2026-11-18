@@ -1,6 +1,20 @@
 # Use airpods-translator as the root of its own repository (see README).
 # No publishing/webhooks are enabled. Start a workflow explicitly in Codemagic.
 workflows:
+  ios-unsigned-ipa:
+    name: Unsigned iPhone IPA for own certificate
+    instance_type: mac_mini_m2
+    max_build_duration: 30
+    environment:
+      xcode: latest
+    scripts:
+      - name: Build iPhone archive and package unsigned IPA
+        script: bash scripts/build_unsigned_ipa.sh
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - build/ios/ipa/*.json
+      - build/unsigned-archive.log
+
   ios-verify:
     name: Core tests and iOS simulator verification
     instance_type: mac_mini_m2
