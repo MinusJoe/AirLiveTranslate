@@ -4,14 +4,18 @@ import Speech
 @MainActor
 final class SpeechRecognizer {
     private var analyzer: SpeechAnalyzer?
-    private var inputTask: Task<Void, Never>?
     private var resultsTask: Task<Void, Never>?
-    private var continuation: AsyncThrowingStream<AnalyzerInput, Error>.Continuation?
+    private var capturedAudio: BufferedMicrophoneAudio?
     private var generation = UUID()
 
     static func availableVariants(for language: AppLanguage) async -> [SpeechVariant] {
         let locales = await SpeechTranscriber.supportedLocales
         return SpeechVariant.supported(for: language, identifiers: locales.map(\.identifier))
+    }
+
+    static func hasInstalledAssets(for variant: SpeechVariant) async -> Bool {
+        let locales = await SpeechTranscriber.installedLocales
+        return SpeechTranscriber.isAvailable && locales.contains { variant.matches($0.identifier) }
     }
 
     private static func exactLocale(for variant: SpeechVariant) async throws -> Locale {
@@ -36,8 +40,7 @@ final class SpeechRecognizer {
 
     func start(variant: SpeechVariant, lowLatency: Bool,
                onLocale: @escaping @MainActor (String) -> Void,
-               audio: @escaping @MainActor () throws -> AsyncThrowingStream<AVAudioPCMBuffer, Error>,
-               inputFormat: AVAudioFormat,
+               audio: BufferedMicrophoneAudio,
                onResult: @escaping @MainActor (RecognitionUpdate) -> Void,
                onError: @escaping @MainActor (Error) -> Void) async throws {
         try Task.checkCancellation()
@@ -45,6 +48,7 @@ final class SpeechRecognizer {
         try Task.checkCancellation()
         let token = UUID()
         generation = token
+        capturedAudio = audio
         let locale = try await Self.exactLocale(for: variant)
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
@@ -52,7 +56,7 @@ final class SpeechRecognizer {
         let reporting: Set<SpeechTranscriber.ReportingOption> = lowLatency ? [.volatileResults, .fastResults] : [.volatileResults]
         let transcriber = SpeechTranscriber(locale: locale, transcriptionOptions: [],
                                             reportingOptions: reporting, attributeOptions: [.audioTimeRange])
-        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: inputFormat) else {
+        guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [transcriber], considering: audio.format) else {
             throw PipelineError.message("本地语音模型尚未就绪，请先准备语言资源。")
         }
         try Task.checkCancellation()
@@ -63,8 +67,6 @@ final class SpeechRecognizer {
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
 
-        let pair = AsyncThrowingStream<AnalyzerInput, Error>.makeStream(bufferingPolicy: .bufferingOldest(64))
-        continuation = pair.continuation
         resultsTask = Task { [weak self] in
             do {
                 for try await result in transcriber.results {
@@ -92,51 +94,16 @@ final class SpeechRecognizer {
             }
         }
 
-        try await currentAnalyzer.start(inputSequence: pair.stream)
+        try await currentAnalyzer.start(inputSequence: CapturedSpeechInput(audio: audio, format: format))
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
-        // Only start the hardware after model preparation, so cold starts cannot overflow capture.
-        let audioStream = try audio()
-        inputTask = Task { [weak self] in
-            let converter = PCMConverter(to: format)
-            do {
-                for try await buffer in audioStream {
-                    try Task.checkCancellation()
-                    guard self?.generation == token else { return }
-                    if let converted = try converter.convert(buffer) {
-                        switch pair.continuation.yield(AnalyzerInput(buffer: converted)) {
-                        case .dropped:
-                            throw PipelineError.message("语音分析跟不上收音速度，已暂停，避免丢失音频。")
-                        case .terminated: return
-                        case .enqueued: break
-                        @unknown default: break
-                        }
-                    }
-                }
-                try Task.checkCancellation()
-                guard self?.generation == token else { return }
-                for tail in try converter.finish() {
-                    if case .dropped = pair.continuation.yield(AnalyzerInput(buffer: tail)) {
-                        throw PipelineError.message("语音分析尾部积压，已停止。")
-                    }
-                }
-                pair.continuation.finish()
-                try await currentAnalyzer.finalizeAndFinishThroughEndOfInput()
-            } catch {
-                pair.continuation.finish(throwing: error)
-                guard !Task.isCancelled, self?.generation == token else { return }
-                onError(error)
-            }
-        }
     }
 
     func stop() async {
         generation = UUID()
-        inputTask?.cancel()
         resultsTask?.cancel()
-        continuation?.finish()
-        continuation = nil
-        inputTask = nil
+        capturedAudio?.discard()
+        capturedAudio = nil
         resultsTask = nil
         let previous = analyzer
         analyzer = nil

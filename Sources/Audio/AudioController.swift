@@ -18,7 +18,7 @@ final class AudioController {
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private let synthesizer = AVSpeechSynthesizer()
-    private var captureContinuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation?
+    private var capturedAudio: BufferedMicrophoneAudio?
     private var synthesisContinuation: SpeechPCMProducer.Stream.Continuation?
     private var playbackCompletionContinuation: AsyncThrowingStream<Void, Error>.Continuation?
     private var observers: [NSObjectProtocol] = []
@@ -145,27 +145,24 @@ final class AudioController {
 
     func start(side: OutputSide, onLevel: @escaping @MainActor (Float) -> Void,
                onRouteFailure: @escaping @MainActor (String) -> Void)
-        throws -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
+        throws -> BufferedMicrophoneAudio {
         snapshot = inspectRoute()
         guard snapshot.output.permits(side) else {
             throw PipelineError.message("当前路由不能保证指定耳播放。请主动选择双耳，或更换支持左右声道的路由。")
         }
         selectedSide = side
         try validateRoute()
-        let pair = AsyncThrowingStream<AVAudioPCMBuffer, Error>.makeStream(bufferingPolicy: .bufferingOldest(64))
-        captureContinuation = pair.continuation
         let format = inputFormat
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw PipelineError.message("麦克风音频格式无效。")
         }
+        let capture = BufferedMicrophoneAudio(format: format)
+        capturedAudio = capture
         let meter = InputLevelMeter()
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            guard let copied = PCMUtilities.copy(buffer) else {
-                pair.continuation.finish(throwing: PipelineError.message("收音缓冲区分配失败。"))
+            if let error = capture.append(buffer) {
+                Task { @MainActor in onRouteFailure(error.localizedDescription) }
                 return
-            }
-            if case .dropped = pair.continuation.yield(copied) {
-                pair.continuation.finish(throwing: PipelineError.message("收音处理积压，已停止，避免静默丢音。"))
             }
             if let level = meter.measure(buffer) {
                 Task { @MainActor in onLevel(level) }
@@ -176,7 +173,7 @@ final class AudioController {
         try engine.start()
         try validateRoute()
         observeRoute(onFailure: onRouteFailure)
-        return pair.stream
+        return capture
     }
 
     func speak(_ text: String, language: AppLanguage, rate: Float,
@@ -261,8 +258,8 @@ final class AudioController {
             tapInstalled = false
         }
         engine.stop()
-        captureContinuation?.finish()
-        captureContinuation = nil
+        capturedAudio?.discard()
+        capturedAudio = nil
         playbackFormat = nil
         expectedInputUID = nil
         expectedOutputUID = nil

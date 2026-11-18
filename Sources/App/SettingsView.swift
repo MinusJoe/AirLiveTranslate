@@ -71,11 +71,11 @@ struct SettingsView: View {
                     LabeledContent("输入", value: model.snapshot.inputName)
                     LabeledContent("输出", value: model.snapshot.outputName)
                     LabeledContent("实际识别地区", value: model.actualLocaleIdentifier)
-                    Text(model.isRunning ? "本次启动检测" : "上次检测结果，当前未收音")
+                    Text(model.microphoneActive ? "本次启动检测" : "上次检测结果，当前未收音")
                         .font(.caption).foregroundStyle(.secondary)
                     Text(model.snapshot.detail).font(.caption).foregroundStyle(.secondary)
                     Text(model.message).font(.footnote)
-                    if model.isRunning {
+                    if model.microphoneActive {
                         ProgressView(value: Double(model.inputLevel)) { Text("输入电平").font(.caption) }
                     }
                     LabeledContent("等待翻译", value: "\(model.pendingCount) 段")

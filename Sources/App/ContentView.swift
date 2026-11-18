@@ -86,7 +86,7 @@ struct ContentView: View {
             HStack(spacing: 8) {
                 Text("\(model.source.name) → \(model.target.name)").foregroundStyle(accent)
                 Spacer(minLength: 4)
-                Label(model.isRunning || model.isReplaying ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
+                Label(model.microphoneActive || model.isReplaying ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
@@ -149,8 +149,8 @@ struct ContentView: View {
     private var emptyState: some View {
         VStack(spacing: 16) {
             Image(systemName: "waveform").font(.system(size: 34)).foregroundStyle(accent)
-            Text(model.isRunning ? "正在听，请自然讲话" : "听懂，就从这里开始").font(.title3).fontWeight(.medium)
-            Text(model.isRunning ? "原文与译文会显示在这里" : "戴好耳机，轻点开始")
+            Text(model.microphoneActive ? "正在听，请自然讲话" : "听懂，就从这里开始").font(.title3).fontWeight(.medium)
+            Text(model.microphoneActive ? "原文与译文会显示在这里" : "戴好耳机，轻点开始")
                 .font(.subheadline).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
@@ -221,8 +221,8 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 7) {
-                Image(systemName: model.isReplaying ? "speaker.wave.2" : model.isRunning ? "waveform" : "pause.circle")
-                    .foregroundStyle(model.isRunning || model.isReplaying ? accent : Color.secondary)
+                Image(systemName: model.isReplaying ? "speaker.wave.2" : model.microphoneActive ? "waveform" : "pause.circle")
+                    .foregroundStyle(model.microphoneActive || model.isReplaying ? accent : Color.secondary)
                 Text(model.isReplaying ? "重播译文 · 收音已暂停" : model.isRunning ? "正在听译" : model.state.rawValue)
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -270,6 +270,7 @@ struct ContentView: View {
 
     private var primaryTitle: String {
         if model.isReplaying { return "停止重播" }
+        if model.state == .buffering { return "暂停收音" }
         if model.isBusy { return "取消准备" }
         if model.isRunning { return "暂停听译" }
         return model.state == .paused ? "继续听译" : "开始听译"
@@ -285,7 +286,7 @@ struct ContentView: View {
         if model.resourcesReady { model.start() }
         else {
             startAfterPreparation = true
-            model.requestPreparation()
+            model.requestPreparation(forListening: true)
         }
     }
 

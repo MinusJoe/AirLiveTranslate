@@ -8,6 +8,7 @@ enum SessionState: String {
     case preparing = "准备语言资源"
     case checking = "检查音频设备"
     case starting = "正在启动"
+    case buffering = "已收音 · 识别预热中"
     case listening = "正在听译"
     case paused = "已暂停"
     case failed = "需要处理"
@@ -85,7 +86,8 @@ final class TranslationViewModel: ObservableObject {
     var languageKey: String { "\(source.rawValue):\(sourceVariant.rawValue)>\(target.rawValue)" }
     var resourcesReady: Bool { preparedKey == languageKey }
     var isRunning: Bool { state == .listening }
-    var isBusy: Bool { [.preparing, .checking, .starting].contains(state) }
+    var microphoneActive: Bool { state == .buffering || isRunning }
+    var isBusy: Bool { [.preparing, .checking, .starting, .buffering].contains(state) }
     var canConfigure: Bool { !isBusy && !isRunning && !isReplaying }
     var unheardCaptions: [Caption] { captions.filter(ReplayPolicy.needsCatchUp) }
 
@@ -106,17 +108,43 @@ final class TranslationViewModel: ObservableObject {
         if !supported.contains(sourceVariant), let first = supported.first { sourceVariant = first }
     }
 
-    func requestPreparation() {
+    func requestPreparation(forListening: Bool = false) {
         guard canConfigure else { return }
         guard source != target else {
             message = "请选择不同的原文和译文语言。"
             state = .failed
             return
         }
-        preparationEpoch = epoch.advance()
+        let token = epoch.advance()
+        preparationEpoch = token
         preparedKey = nil
         state = .preparing
-        message = "正在检查并准备本地语言模型；首次下载可能需要几分钟。"
+        message = "正在检查离线语言资源，麦克风尚未开启。"
+        if forListening {
+            // On a fresh launch our in-memory preparedKey is empty even when every
+            // language asset is installed. Skip the download UI on this common path.
+            let variant = sourceVariant
+            let from = Locale.Language(identifier: source.rawValue)
+            let to = Locale.Language(identifier: target.rawValue)
+            launchTask = Task {
+                async let installed = SpeechRecognizer.hasInstalledAssets(for: variant)
+                let translation = await LanguageAvailability().status(from: from, to: to)
+                let hasSpeech = await installed
+                guard !Task.isCancelled, epoch.accepts(token) else { return }
+                if hasSpeech, translation == .installed, AVSpeechSynthesisVoice(language: target.speechLocale) != nil {
+                    preparedKey = languageKey
+                    state = .idle
+                } else {
+                    prepareWithDownloadUI()
+                }
+            }
+        } else {
+            prepareWithDownloadUI()
+        }
+    }
+
+    private func prepareWithDownloadUI() {
+        message = "正在准备离线语言资源，准备完成后才能收音。"
         if translationConfiguration == nil {
             translationConfiguration = .init(source: Locale.Language(identifier: source.rawValue),
                                              target: Locale.Language(identifier: target.rawValue))
@@ -214,7 +242,7 @@ final class TranslationViewModel: ObservableObject {
         let requestedCapture = captureSource
         let requestedSide = outputSide
         state = .starting
-        message = "正在启动本地识别与耳机音频。"
+        message = "正在连接麦克风。看到“已收音”后即可讲话。"
         draft = ""
         committer = StreamingCommitter(lowLatencyEnabled: requestedLowLatency)
         queue.removeAll()
@@ -244,8 +272,19 @@ final class TranslationViewModel: ObservableObject {
                 self.snapshot = try await self.audio.configure(source: requestedCapture)
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
+                let capture = try self.audio.start(side: requestedSide, onLevel: { [weak self] level in
+                    guard let self, self.epoch.accepts(token) else { return }
+                    self.inputLevel = level
+                }, onRouteFailure: { [weak self] reason in
+                    guard let self, self.epoch.accepts(token) else { return }
+                    self.stop(reason: reason, failed: true)
+                })
+                self.state = .buffering
+                self.message = "可以讲话了。开头语音已开始在内存中暂存，识别就绪后会从头处理。"
                 let status = await LanguageAvailability().status(from: Locale.Language(identifier: requestedSource.rawValue),
                                                                 to: Locale.Language(identifier: requestedTarget.rawValue))
+                try Task.checkCancellation()
+                guard self.epoch.accepts(token) else { return }
                 guard status == .installed else {
                     self.preparedKey = nil
                     throw PipelineError.message("翻译语言资源未安装或已被系统移除，请重新准备资源。")
@@ -257,17 +296,8 @@ final class TranslationViewModel: ObservableObject {
                 try await self.speech.start(variant: requestedVariant, lowLatency: requestedLowLatency, onLocale: { [weak self] locale in
                     guard let self, self.epoch.accepts(token) else { return }
                     self.actualLocaleIdentifier = locale
-                }, audio: { [weak self] in
-                    guard let self, self.epoch.accepts(token) else { throw CancellationError() }
-                    return try self.audio.start(side: requestedSide, onLevel: { [weak self] level in
-                        guard let self, self.epoch.accepts(token) else { return }
-                        self.inputLevel = level
-                    }, onRouteFailure: { [weak self] reason in
-                        guard let self, self.epoch.accepts(token) else { return }
-                        self.stop(reason: reason, failed: true)
-                    })
-                }, inputFormat: self.audio.inputFormat,
-                                            onResult: { [weak self] update in
+                }, audio: capture,
+                onResult: { [weak self] update in
                     guard let self, self.epoch.accepts(token) else { return }
                     self.receive(update, token: token)
                 }, onError: { [weak self] error in
