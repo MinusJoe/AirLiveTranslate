@@ -77,7 +77,9 @@ struct StreamingCommitter {
 
         if update.isFinal {
             let finalText = revisionSeen ? update.text : String(update.text.dropFirst(committedPrefix.count))
-            let text = ClauseBoundary.fragment(finalText)
+            let text = committedPrefix.isEmpty || revisionSeen
+                ? finalText.trimmingCharacters(in: .whitespacesAndNewlines)
+                : ClauseBoundary.fragment(finalText)
             if text.contains(where: { !$0.isWhitespace && !$0.isPunctuation }) {
                 let start = revisionSeen ? update.start : max(update.start, committedThrough)
                 if update.end > start {

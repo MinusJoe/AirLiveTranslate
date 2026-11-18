@@ -27,7 +27,8 @@ enum ClauseBoundary {
     private static let softSeparators = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ",，、;；"))
 
     static func fragment(_ text: String) -> String {
-        text.trimmingCharacters(in: softSeparators)
+        let suffix = text.drop(while: { $0.unicodeScalars.allSatisfy(softSeparators.contains) })
+        return suffix.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func matches(_ regex: NSRegularExpression, _ text: String) -> Bool {
