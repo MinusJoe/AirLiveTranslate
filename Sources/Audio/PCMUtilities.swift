@@ -1,5 +1,50 @@
 import AVFAudio
 
+/// Contiguous planar Float32 samples in the actual player format, including the resampler tail.
+final class ReplayPCMBuffer {
+    let format: AVAudioFormat
+    private let maxFrames: Int
+    private(set) var buffer: AVAudioPCMBuffer?
+
+    init(format: AVAudioFormat, byteLimit: Int = 32 * 1024 * 1024) {
+        self.format = format
+        maxFrames = max(0, byteLimit) / (max(1, Int(format.channelCount)) * MemoryLayout<Float>.stride)
+    }
+
+    func append(_ input: AVAudioPCMBuffer) throws {
+        guard input.format == format, !format.isInterleaved, format.commonFormat == .pcmFormatFloat32,
+              let source = input.floatChannelData else {
+            throw PipelineError.message("补听音频格式已改变，请重新播放。")
+        }
+        let count = Int(input.frameLength)
+        guard count > 0 else { return }
+        let used = Int(buffer?.frameLength ?? 0)
+        let needed = used + count
+        guard needed <= maxFrames else { throw PipelineError.message("此段合成音频过长，无法完整补听。") }
+        let capacity = Int(buffer?.frameCapacity ?? 0)
+        if needed > capacity {
+            let nextSize = min(maxFrames, max(needed, max(4096, capacity * 2)))
+            guard let next = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(nextSize)),
+                  let destination = next.floatChannelData else {
+                throw PipelineError.message("补听音频缓冲区分配失败。")
+            }
+            if let previous = buffer?.floatChannelData {
+                for channel in 0..<Int(format.channelCount) {
+                    destination[channel].update(from: previous[channel], count: used)
+                }
+            }
+            buffer = next
+        }
+        guard let buffer, let destination = buffer.floatChannelData else {
+            throw PipelineError.message("补听音频缓冲区不可用。")
+        }
+        for channel in 0..<Int(format.channelCount) {
+            destination[channel].advanced(by: used).update(from: source[channel], count: count)
+        }
+        buffer.frameLength = AVAudioFrameCount(needed)
+    }
+}
+
 enum PCMUtilities {
     /// Audio taps reuse their buffer after the callback returns. Never enqueue the borrowed buffer.
     static func copy(_ source: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {

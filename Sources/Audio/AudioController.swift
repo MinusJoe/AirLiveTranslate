@@ -214,14 +214,22 @@ final class AudioController {
             }
         }
         let converter = PCMConverter(to: playbackFormat)
+        // Replay utterances are already bounded by ReplayPolicy.maximumChunkCharacters.
+        // Queue one continuous buffer per chunk so Bluetooth output latency is paid once,
+        // regardless of how finely the synthesizer fragments its PCM callbacks.
+        let replayPCM = captureRequired ? nil : ReplayPCMBuffer(format: playbackFormat)
         var emitted = false
         do {
             for try await pcm in pair.stream {
                 try Task.checkCancellation()
                 guard playbackGeneration == token else { throw CancellationError() }
-                try validateRoute()
                 guard let converted = try converter.convert(pcm) else { continue }
                 try PCMUtilities.isolate(converted, side: selectedSide)
+                if let replayPCM {
+                    try replayPCM.append(converted)
+                    continue
+                }
+                try validateRoute()
                 if !emitted { onFirstBufferScheduled?() }
                 emitted = true
                 schedule(converted, completion: completions.continuation)
@@ -234,8 +242,12 @@ final class AudioController {
             for tail in try converter.finish() {
                 try Task.checkCancellation()
                 guard playbackGeneration == token else { throw CancellationError() }
-                try validateRoute()
                 try PCMUtilities.isolate(tail, side: selectedSide)
+                if let replayPCM {
+                    try replayPCM.append(tail)
+                    continue
+                }
+                try validateRoute()
                 if !emitted { onFirstBufferScheduled?() }
                 emitted = true
                 schedule(tail, completion: completions.continuation)
@@ -244,6 +256,15 @@ final class AudioController {
                     guard try await completionIterator.next() != nil else { throw CancellationError() }
                     scheduledCount -= 1
                 }
+            }
+            if let buffer = replayPCM?.buffer {
+                try Task.checkCancellation()
+                guard playbackGeneration == token else { throw CancellationError() }
+                try validateRoute()
+                schedule(buffer, completion: completions.continuation)
+                emitted = true
+                scheduledCount = 1
+                onFirstBufferScheduled?()
             }
             while scheduledCount > 0 {
                 try Task.checkCancellation()
