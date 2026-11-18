@@ -115,7 +115,7 @@ struct SpeechSegment: Identifiable, Equatable, Sendable {
 
 /// Deduplicate by finalized audio range, never by text: repeated words can be genuine speech.
 struct FinalizationLedger {
-    private var lastEnd: Double = -.infinity
+    private(set) var lastEnd: Double = -.infinity
 
     mutating func accept(text: String, start: Double, end: Double) -> SpeechSegment? {
         guard start.isFinite, end.isFinite, end > start, end > lastEnd,

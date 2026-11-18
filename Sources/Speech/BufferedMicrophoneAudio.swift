@@ -14,6 +14,7 @@ final class BufferedMicrophoneAudio: @unchecked Sendable {
     private var frames = 0
     private var acceptedFrames: Int64 = 0
     private var closed = false
+    private var inputEnded = false
     private var failure: PipelineError?
 
     var capturedSeconds: Double {
@@ -34,7 +35,7 @@ final class BufferedMicrophoneAudio: @unchecked Sendable {
     /// session immediately even if analyzer preparation is still suspended.
     func append(_ borrowed: AVAudioPCMBuffer) -> PipelineError? {
         lock.lock()
-        guard !closed else { lock.unlock(); return nil }
+        guard !closed, !inputEnded else { lock.unlock(); return nil }
         let length = Int(borrowed.frameLength)
         guard length > 0 else { lock.unlock(); return nil }
         let error: PipelineError
@@ -74,6 +75,14 @@ final class BufferedMicrophoneAudio: @unchecked Sendable {
         wake.continuation.finish()
     }
 
+    /// End the producer while allowing the analyzer to read the final queued frames.
+    func finishInput() {
+        lock.lock()
+        inputEnded = true
+        lock.unlock()
+        wake.continuation.finish()
+    }
+
     private func pop() throws -> AVAudioPCMBuffer? {
         lock.lock()
         defer { lock.unlock() }
@@ -91,14 +100,13 @@ final class BufferedMicrophoneAudio: @unchecked Sendable {
         fileprivate let queue: BufferedMicrophoneAudio
         fileprivate var signals: AsyncStream<Void>.Iterator
 
-        mutating func next() async throws -> AVAudioPCMBuffer {
+        mutating func next() async throws -> AVAudioPCMBuffer? {
             while true {
                 try Task.checkCancellation()
                 if let buffer = try queue.pop() { return buffer }
                 if await signals.next() == nil {
                     // Report a producer failure even if it occurred between pop and next.
-                    _ = try queue.pop()
-                    throw CancellationError()
+                    return try queue.pop()
                 }
             }
         }
@@ -119,10 +127,21 @@ struct CapturedSpeechInput: AsyncSequence, Sendable {
     struct AsyncIterator: AsyncIteratorProtocol {
         var reader: BufferedMicrophoneAudio.Reader
         let converter: PCMConverter
+        private var tail = ArraySlice<AVAudioPCMBuffer>()
+        private var reachedEnd = false
+        init(reader: BufferedMicrophoneAudio.Reader, converter: PCMConverter) {
+            self.reader = reader
+            self.converter = converter
+        }
         mutating func next() async throws -> AnalyzerInput? {
             while true {
-                let buffer = try await reader.next()
                 try Task.checkCancellation()
+                if reachedEnd { return tail.popFirst().map { AnalyzerInput(buffer: $0) } }
+                guard let buffer = try await reader.next() else {
+                    reachedEnd = true
+                    tail = ArraySlice(try converter.finish())
+                    continue
+                }
                 if let converted = try converter.convert(buffer) { return AnalyzerInput(buffer: converted) }
             }
         }

@@ -36,6 +36,25 @@ final class BufferedMicrophoneTests: XCTestCase {
         queue.discard()
     }
 
+    func testFinishingTurnDrainsOpeningAndLastWordThenEnds() async throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let queue = BufferedMicrophoneAudio(format: format)
+        let sample = try block(format, frames: 5)
+        for value in [Float(1), 2, 3] {
+            sample.floatChannelData?[0][0] = value
+            XCTAssertNil(queue.append(sample))
+        }
+        queue.finishInput()
+        XCTAssertNil(queue.append(sample))
+        var source = CapturedSpeechInput(audio: queue, format: format).makeAsyncIterator()
+        var values: [Float] = []
+        while let input = try await source.next() {
+            values.append(try XCTUnwrap(input.buffer.floatChannelData)[0][0])
+        }
+        XCTAssertEqual(values, [1, 2, 3])
+        XCTAssertEqual(queue.capturedSeconds, 15.0 / 16_000, accuracy: 0.000001)
+    }
+
     func testDequeuingFreesBudgetAcrossRingWrap() async throws {
         let fmt = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
         let q = BufferedMicrophoneAudio(format: fmt, blockLimit: 2)
@@ -45,7 +64,7 @@ final class BufferedMicrophoneTests: XCTestCase {
             b.floatChannelData?[0][0] = Float(i)
             XCTAssertNil(q.append(b))
             let result = try await reader.next()
-            XCTAssertEqual(result.floatChannelData?[0][0], Float(i))
+            XCTAssertEqual(result?.floatChannelData?[0][0], Float(i))
         }
         q.discard()
     }

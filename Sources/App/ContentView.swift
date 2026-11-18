@@ -17,6 +17,8 @@ struct ContentView: View {
     @State private var pendingReplayID: UUID?
     @State private var askAwareness = false
     @State private var askSkip = false
+    @State private var showConversation = false
+    @State private var partnerToHear: AppLanguage?
     @State private var startAfterPreparation = false
 
     var body: some View {
@@ -39,6 +41,12 @@ struct ContentView: View {
             }
             .sheet(item: $meetingSheet) { meeting in
                 MeetingMinutesView(minutes: meeting, listening: model.isRunning || model.isBusy, savedSummary: $savedSummary)
+            }
+            .sheet(isPresented: $showConversation, onDismiss: startPartnerTurn) {
+                ConversationView(language: ConversationTurn.partnerLanguage(source: model.source, target: model.target),
+                                 source: model.captureSource,
+                                 chineseVariant: model.sourceVariant.language == .chinese ? model.sourceVariant : .chineseMainland,
+                                 rate: Float(model.speakingRate)) { partnerToHear = $0 }
             }
             .confirmationDialog("结束这次听译？", isPresented: $askEnd, titleVisibility: .visible) {
                 Button("结束并查看会议纪要") {
@@ -109,6 +117,13 @@ struct ContentView: View {
             }
             HStack(spacing: 8) {
                 Text("\(model.source.name) → \(model.target.name)").foregroundStyle(accent)
+                Button("面对面对话") {
+                    startAfterPreparation = false
+                    if model.isRunning || model.isBusy || model.isReplaying {
+                        model.stop(reason: "实时听译已暂停，可以说中文回复。")
+                    }
+                    showConversation = true
+                }.buttonStyle(.bordered).controlSize(.small)
                 Spacer(minLength: 4)
                 Label(model.microphoneActive || model.isReplaying ? model.outputSide.name : "开始时检查耳机", systemImage: "headphones")
                     .foregroundStyle(.secondary)
@@ -303,6 +318,14 @@ struct ContentView: View {
 
     private var accent: Color {
         colorScheme == .dark ? Color(red: 0.43, green: 0.84, blue: 0.81) : Color(red: 0.03, green: 0.50, blue: 0.51)
+    }
+
+    private func startPartnerTurn() {
+        guard let language = partnerToHear else { return }
+        partnerToHear = nil
+        if model.source != language { model.source = language }
+        if model.target != .chinese { model.target = .chinese }
+        if model.awarenessConfirmed { begin() } else { askAwareness = true }
     }
 
     private func begin() {

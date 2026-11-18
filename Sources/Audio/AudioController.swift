@@ -31,6 +31,8 @@ final class AudioController {
     private var expectedOutputUID: String?
     private var selectedSource: CaptureSource = .headset
     private var captureRequired = false
+    private var requiresFarField = false
+    private var partnerSpeaker = false
     private var selectedSide: OutputSide = .both
     private var playbackGeneration = UUID()
     private var routeGeneration = UUID()
@@ -46,7 +48,8 @@ final class AudioController {
         }
     }
 
-    func configure(source: CaptureSource, side: OutputSide = .both, probeStereo: Bool = false) async throws -> AudioSnapshot {
+    func configure(source: CaptureSource, side: OutputSide = .both, probeStereo: Bool = false,
+                   farField: Bool = true) async throws -> AudioSnapshot {
         try Task.checkCancellation()
         let originalOutput = session.currentRoute.outputs.first
         stop()
@@ -54,12 +57,15 @@ final class AudioController {
         snapshot = AudioSnapshot()
         selectedSource = source
         captureRequired = true
+        requiresFarField = source == .headset && farField
         var options: AVAudioSession.CategoryOptions = []
-        if source == .headset {
+        if requiresFarField {
             guard #available(iOS 26.2, *) else {
                 throw PipelineError.message("耳机远场收音需要 iOS 26.2 或更新版本。可主动选择手机麦克风备用。")
             }
             options = [.allowBluetoothHFP, .farFieldInput]
+        } else if source == .headset {
+            options = [.allowBluetoothHFP]
         } else {
             options = [.allowBluetoothA2DP]
         }
@@ -94,7 +100,7 @@ final class AudioController {
                 triedStereo = true
                 requestStereoIfSupported()
             }
-            let ok = (source == .phone || Self.farFieldEnabled(active)) &&
+            let ok = (!requiresFarField || Self.farFieldEnabled(active)) &&
                 (side == .both || (privateOutput != nil && inspectRoute().output.permits(side)))
             if negotiation.ready(input: matched?.uid, output: privateOutput, capabilitiesOK: ok, now: now) {
                 expectedInputUID = matched?.uid
@@ -113,7 +119,7 @@ final class AudioController {
                 reason = "系统未切换到“" + (negotiation.target?.name ?? source.name) + "”。"
             } else if !snapshot.output.isHeadphones {
                 reason = "请将系统音频输出切换到耳机。"
-            } else if source == .headset && !snapshot.farFieldEnabled {
+            } else if requiresFarField && !snapshot.farFieldEnabled {
                 reason = snapshot.farFieldSupported ? "系统尚未启用耳机远场收音。" : "当前耳机路由未提供远场收音。"
             } else if !snapshot.output.permits(side) {
                 reason = "当前录放音路由未提供指定耳侧，请在设置中选择双耳后重试。"
@@ -126,7 +132,7 @@ final class AudioController {
         }
         try validateRoute()
         try configureOutputGraph()
-        snapshot.detail = source == .headset ? "耳机远场收音已实际启用" : "已使用你选择的手机麦克风"
+        snapshot.detail = requiresFarField ? "耳机远场收音已实际启用" : "所选麦克风已启用"
         return snapshot
     }
 
@@ -283,6 +289,42 @@ final class AudioController {
         player.stop()
     }
 
+    func finishTurnCapture() {
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        capturedAudio?.finishInput()
+        capturedAudio = nil
+        stop()
+    }
+
+    /// Public playback is a distinct, explicit operation after capture has stopped.
+    func configurePartnerSpeaker(onFailure: @escaping @MainActor (String) -> Void) async throws {
+        try Task.checkCancellation()
+        stop()
+        selectedSide = .both
+        try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+        try session.setActive(true)
+        ownsActiveSession = true
+        partnerSpeaker = true
+        try session.overrideOutputAudioPort(.speaker)
+        for _ in 0..<20 {
+            try Task.checkCancellation()
+            if session.currentRoute.outputs.count == 1, session.currentRoute.outputs.first?.portType == .builtInSpeaker { break }
+            try await Task.sleep(for: .milliseconds(75))
+        }
+        try Task.checkCancellation()
+        expectedOutputUID = session.currentRoute.outputs.first?.uid
+        try validateRoute()
+        snapshot = inspectRoute()
+        try configureOutputGraph()
+        engine.prepare()
+        try engine.start()
+        try validateRoute()
+        observeRoute(onFailure: onFailure)
+    }
+
     func stop() {
         routeGeneration = UUID()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
@@ -302,6 +344,10 @@ final class AudioController {
         captureRequired = false
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
+        if partnerSpeaker {
+            try? session.overrideOutputAudioPort(.none)
+            partnerSpeaker = false
+        }
         if ownsActiveSession {
             try? session.setActive(false, options: .notifyOthersOnDeactivation)
             ownsActiveSession = false
@@ -382,6 +428,13 @@ final class AudioController {
 
     private func validateRoute() throws {
         let route = session.currentRoute
+        if partnerSpeaker {
+            guard !captureRequired, session.category == .playAndRecord, route.outputs.count == 1,
+                  let port = route.outputs.first, port.portType == .builtInSpeaker, port.uid == expectedOutputUID else {
+                throw PipelineError.message("手机扬声器不可用。可以把屏幕上的译文给对方看。")
+            }
+            return
+        }
         if captureRequired {
             guard session.category == .playAndRecord, route.inputs.count == 1, let input = route.inputs.first,
                   input.uid == expectedInputUID, Self.accepts(input, source: selectedSource) else {
@@ -397,7 +450,7 @@ final class AudioController {
         if selectedSide != .both && !inspectRoute().output.permits(selectedSide) {
             throw PipelineError.message("当前耳机声道无法单独向所选耳侧播放。请检查声道或选择双耳。")
         }
-        if captureRequired && selectedSource == .headset && !Self.farFieldEnabled(route.inputs.first) {
+        if captureRequired && requiresFarField && !Self.farFieldEnabled(route.inputs.first) {
             throw PipelineError.message("系统已停用耳机远场收音。" + routeSummary())
         }
     }

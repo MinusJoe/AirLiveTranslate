@@ -38,7 +38,7 @@ final class SpeechRecognizer {
         try Task.checkCancellation()
     }
 
-    func start(variant: SpeechVariant, lowLatency: Bool,
+    func start(variant: SpeechVariant, lowLatency: Bool, finiteTurn: Bool = false,
                onLocale: @escaping @MainActor (String) -> Void,
                audio: BufferedMicrophoneAudio,
                onResult: @escaping @MainActor (RecognitionUpdate) -> Void,
@@ -87,7 +87,7 @@ final class SpeechRecognizer {
                     onResult(RecognitionUpdate(text: String(result.text.characters), isFinal: result.isFinal,
                                                start: start, end: end, boundaries: boundaries, capturedSeconds: audio.capturedSeconds))
                 }
-                guard !Task.isCancelled, self?.generation == token else { return }
+                guard !Task.isCancelled, self?.generation == token, !finiteTurn else { return }
                 onError(PipelineError.message("语音分析已结束，请重新开始听译。"))
             } catch {
                 guard !Task.isCancelled, self?.generation == token else { return }
@@ -109,5 +109,12 @@ final class SpeechRecognizer {
         let previous = analyzer
         analyzer = nil
         await previous?.cancelAndFinishNow()
+    }
+
+    func finishTurn() async throws {
+        guard let analyzer else { throw PipelineError.message("语音识别尚未就绪。") }
+        try await analyzer.finalizeAndFinishThroughEndOfInput()
+        await resultsTask?.value
+        try Task.checkCancellation()
     }
 }
