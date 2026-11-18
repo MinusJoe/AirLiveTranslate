@@ -151,5 +151,87 @@ final class PCMUtilitiesTests: XCTestCase {
         XCTAssertThrowsError(try replay.append(buffer(channels: 1)))
         XCTAssertEqual(replay.buffer?.frameLength, 16)
     }
+
+    func testLiveSpeechDoesNotWaitForHeadphonePlaybackBetweenTinyFragments() async throws {
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let pipe = SpeechPCMProducer.Stream.makeStream()
+        let producer = SpeechPCMProducer(format: format, side: .right, live: true, continuation: pipe.continuation)
+        let first = expectation(description: "First live packet arrives before synthesis finishes")
+        let read = Task { () throws -> [SpeechPlaybackPacket] in
+            var packets: [SpeechPlaybackPacket] = []
+            for try await packet in pipe.stream {
+                packets.append(packet)
+                if packets.count == 1 { first.fulfill() }
+            }
+            return packets
+        }
+        let frames = 48_013
+        var offset = 0
+        while offset < frames {
+            let count = min(31, frames - offset)
+            let part = try buffer(channels: 2, frames: AVAudioFrameCount(count))
+            let channels = try XCTUnwrap(part.floatChannelData)
+            for i in 0..<count { channels[1][i] = Float((offset + i) % 113) / 128 }
+            producer.receive(part)
+            offset += count
+        }
+        await fulfillment(of: [first], timeout: 2)
+        let end = try buffer(channels: 2, frames: 1)
+        end.frameLength = 0
+        producer.receive(end)
+        let packets = try await read.value
+        XCTAssertEqual(packets.count, 13)
+        XCTAssertEqual(packets.filter(\.isFinal).count, 1)
+        XCTAssertEqual(packets.last?.completionType, .dataPlayedBack)
+        XCTAssertTrue(packets.dropLast().allSatisfy { $0.completionType == .dataConsumed && $0.buffer.frameLength == 3840 })
+        var index = 0
+        for packet in packets {
+            let data = try XCTUnwrap(packet.buffer.floatChannelData)
+            for frame in 0..<Int(packet.buffer.frameLength) {
+                guard data[0][frame] == 0, data[1][frame] == Float(index % 113) / 128 else {
+                    return XCTFail("Unexpected gap, sample order or ear in live speech")
+                }
+                index += 1
+            }
+        }
+        XCTAssertEqual(index, frames)
+    }
+
+    func testLivePacketTimingTracksTheActiveRouteAndExactMultipleHasAFinalCallback() async throws {
+        for rate: Double in [16_000, 24_000, 44_100, 48_000] {
+            let part = try buffer(channels: 1, frames: AVAudioFrameCount(rate * 0.32), rate: rate)
+            let pipe = SpeechPCMProducer.Stream.makeStream()
+            let producer = SpeechPCMProducer(format: part.format, side: .both, live: true, continuation: pipe.continuation)
+            producer.receive(part)
+            part.frameLength = 0
+            producer.receive(part)
+            var flags: [Bool] = []
+            for try await packet in pipe.stream {
+                XCTAssertEqual(Double(packet.buffer.frameLength) / rate, 0.080, accuracy: 0.00001)
+                flags.append(packet.isFinal)
+            }
+            XCTAssertEqual(flags, [false, false, false, true])
+        }
+    }
+
+    func testShortLiveSpeechAndManualReplayIncludeResampledTailAndFinishOnce() async throws {
+        for live in [true, false] {
+            let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+            let pipe = SpeechPCMProducer.Stream.makeStream()
+            let producer = SpeechPCMProducer(format: format, side: .both, live: live, continuation: pipe.continuation)
+            let count = live ? 6 : 100
+            let part = try buffer(channels: 1, frames: 240, rate: 24_000)
+            for _ in 0..<count { producer.receive(part) }
+            part.frameLength = 0
+            producer.receive(part)
+            producer.receive(part)
+            var packets: [SpeechPlaybackPacket] = []
+            for try await packet in pipe.stream { packets.append(packet) }
+            XCTAssertEqual(packets.count, 1)
+            let last = try XCTUnwrap(packets.last)
+            XCTAssertEqual(last.completionType, .dataPlayedBack)
+            XCTAssertEqual(Double(last.buffer.frameLength) / format.sampleRate, Double(count) * 0.01, accuracy: 0.005)
+        }
+    }
 }
 #endif

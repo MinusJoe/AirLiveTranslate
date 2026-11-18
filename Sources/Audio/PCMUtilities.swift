@@ -11,12 +11,16 @@ final class ReplayPCMBuffer {
         maxFrames = max(0, byteLimit) / (max(1, Int(format.channelCount)) * MemoryLayout<Float>.stride)
     }
 
-    func append(_ input: AVAudioPCMBuffer) throws {
+    func append(_ input: AVAudioPCMBuffer, frames: Range<Int>? = nil) throws {
         guard input.format == format, !format.isInterleaved, format.commonFormat == .pcmFormatFloat32,
               let source = input.floatChannelData else {
-            throw PipelineError.message("补听音频格式已改变，请重新播放。")
+            throw PipelineError.message("播报音频格式已改变，请重新播放。")
         }
-        let count = Int(input.frameLength)
+        let range = frames ?? (0..<Int(input.frameLength))
+        guard range.lowerBound >= 0, range.upperBound <= Int(input.frameLength) else {
+            throw PipelineError.message("播报音频帧范围无效。")
+        }
+        let count = range.count
         guard count > 0 else { return }
         let used = Int(buffer?.frameLength ?? 0)
         let needed = used + count
@@ -39,9 +43,90 @@ final class ReplayPCMBuffer {
             throw PipelineError.message("补听音频缓冲区不可用。")
         }
         for channel in 0..<Int(format.channelCount) {
-            destination[channel].advanced(by: used).update(from: source[channel], count: count)
+            destination[channel].advanced(by: used).update(from: source[channel].advanced(by: range.lowerBound), count: count)
         }
         buffer.frameLength = AVAudioFrameCount(needed)
+    }
+
+    func take() -> AVAudioPCMBuffer? {
+        defer { buffer = nil }
+        return buffer
+    }
+}
+
+struct SpeechPlaybackPacket {
+    let buffer: AVAudioPCMBuffer
+    let isFinal: Bool
+    var completionType: AVAudioPlayerNodeCompletionCallbackType {
+        isFinal ? .dataPlayedBack : .dataConsumed
+    }
+}
+
+/// Owns one utterance's conversion and buffering. All mutable state is confined to
+/// receive(), under the lock; only owned, immutable-after-yield buffers reach the player.
+final class SpeechPCMProducer: @unchecked Sendable {
+    typealias Stream = AsyncThrowingStream<SpeechPlaybackPacket, Error>
+    private let lock = NSLock()
+    private let converter: PCMConverter
+    private let pending: ReplayPCMBuffer
+    private let side: OutputSide
+    private let framesPerPacket: Int?
+    private let continuation: Stream.Continuation
+    private var finished = false
+
+    init(format: AVAudioFormat, side: OutputSide, live: Bool, continuation: Stream.Continuation) {
+        self.converter = PCMConverter(to: format)
+        self.pending = ReplayPCMBuffer(format: format)
+        self.side = side
+        self.continuation = continuation
+        self.framesPerPacket = live ? max(1, Int((format.sampleRate * 0.080).rounded())) : nil
+    }
+
+    func receive(_ raw: AVAudioBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        do {
+            guard let pcm = raw as? AVAudioPCMBuffer else {
+                throw PipelineError.message("系统语音返回了不支持的音频格式。")
+            }
+            if pcm.frameLength == 0 {
+                for tail in try converter.finish() { try add(tail) }
+                try emit(final: true)
+                finished = true
+                continuation.finish()
+            } else if let converted = try converter.convert(pcm) {
+                try add(converted)
+            }
+        } catch {
+            finished = true
+            continuation.finish(throwing: error)
+        }
+    }
+
+    private func add(_ pcm: AVAudioPCMBuffer) throws {
+        try PCMUtilities.isolate(pcm, side: side)
+        guard let framesPerPacket else { try pending.append(pcm); return }
+        var offset = 0
+        while offset < Int(pcm.frameLength) {
+            // Keep the last packet until the next sample or EOF. This also tags the
+            // correct final packet when the utterance ends on an exact 80 ms boundary.
+            if Int(pending.buffer?.frameLength ?? 0) == framesPerPacket { try emit(final: false) }
+            let space = framesPerPacket - Int(pending.buffer?.frameLength ?? 0)
+            let end = min(offset + space, Int(pcm.frameLength))
+            try pending.append(pcm, frames: offset..<end)
+            offset = end
+        }
+    }
+
+    private func emit(final: Bool) throws {
+        guard let buffer = pending.take() else { throw PipelineError.message("系统语音没有生成可播放的声音。") }
+        switch continuation.yield(SpeechPlaybackPacket(buffer: buffer, isFinal: final)) {
+        case .enqueued: break
+        case .terminated: throw CancellationError()
+        case .dropped: throw PipelineError.message("语音合成积压，已停止播放。")
+        @unknown default: throw PipelineError.message("语音输出不可用。")
+        }
     }
 }
 

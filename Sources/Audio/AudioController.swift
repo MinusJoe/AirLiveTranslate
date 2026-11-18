@@ -19,7 +19,7 @@ final class AudioController {
     private var player = AVAudioPlayerNode()
     private let synthesizer = AVSpeechSynthesizer()
     private var captureContinuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation?
-    private var synthesisContinuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation?
+    private var synthesisContinuation: SpeechPCMProducer.Stream.Continuation?
     private var playbackCompletionContinuation: AsyncThrowingStream<Void, Error>.Continuation?
     private var observers: [NSObjectProtocol] = []
     private var tapInstalled = false
@@ -190,89 +190,46 @@ final class AudioController {
         guard text.count <= 1800 else { throw PipelineError.oversizedSegment }
         let token = UUID()
         playbackGeneration = token
-        let pair = AsyncThrowingStream<AVAudioPCMBuffer, Error>.makeStream(bufferingPolicy: .bufferingOldest(512))
-        let completions = AsyncThrowingStream<Void, Error>.makeStream(bufferingPolicy: .bufferingOldest(8))
+        // Bound producer lead by duration (512 × 80 ms in live mode), independent of
+        // the often tiny fragments delivered by AVSpeechSynthesizer.write.
+        let pair = SpeechPCMProducer.Stream.makeStream(bufferingPolicy: .bufferingOldest(512))
+        let completions = AsyncThrowingStream<Void, Error>.makeStream(bufferingPolicy: .bufferingOldest(4))
         playbackCompletionContinuation = completions.continuation
-        var completionIterator = completions.stream.makeAsyncIterator()
-        var scheduledCount = 0
         synthesisContinuation = pair.continuation
+        var completionIterator = completions.stream.makeAsyncIterator()
+        let producer = SpeechPCMProducer(format: playbackFormat, side: selectedSide, live: captureRequired,
+                                         continuation: pair.continuation)
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
         utterance.rate = min(max(rate, 0.35), 0.65)
-        synthesizer.write(utterance) { buffer in
-            guard let pcm = buffer as? AVAudioPCMBuffer else {
-                pair.continuation.finish(throwing: PipelineError.message("系统语音返回了不支持的音频格式。"))
-                return
-            }
-            guard pcm.frameLength > 0 else { pair.continuation.finish(); return }
-            guard let copied = PCMUtilities.copy(pcm) else {
-                pair.continuation.finish(throwing: PipelineError.message("语音合成缓冲区分配失败。"))
-                return
-            }
-            if case .dropped = pair.continuation.yield(copied) {
-                pair.continuation.finish(throwing: PipelineError.message("语音合成积压，已停止播放。"))
-            }
-        }
-        let converter = PCMConverter(to: playbackFormat)
-        // Replay utterances are already bounded by ReplayPolicy.maximumChunkCharacters.
-        // Queue one continuous buffer per chunk so Bluetooth output latency is paid once,
-        // regardless of how finely the synthesizer fragments its PCM callbacks.
-        let replayPCM = captureRequired ? nil : ReplayPCMBuffer(format: playbackFormat)
-        var emitted = false
+        synthesizer.write(utterance, toBufferCallback: producer.receive)
+        var inFlight = 0
+        var started = false
         do {
-            for try await pcm in pair.stream {
+            for try await packet in pair.stream {
                 try Task.checkCancellation()
                 guard playbackGeneration == token else { throw CancellationError() }
-                guard let converted = try converter.convert(pcm) else { continue }
-                try PCMUtilities.isolate(converted, side: selectedSide)
-                if let replayPCM {
-                    try replayPCM.append(converted)
-                    continue
-                }
                 try validateRoute()
-                if !emitted { onFirstBufferScheduled?() }
-                emitted = true
-                schedule(converted, completion: completions.continuation)
-                scheduledCount += 1
-                if scheduledCount >= 4 {
+                player.scheduleBuffer(packet.buffer, completionCallbackType: packet.completionType) { _ in
+                    completions.continuation.yield(())
+                }
+                if !player.isPlaying { player.play() }
+                if !started {
+                    started = true
+                    onFirstBufferScheduled?()
+                }
+                inFlight += 1
+                if inFlight == 4 {
                     guard try await completionIterator.next() != nil else { throw CancellationError() }
-                    scheduledCount -= 1
+                    inFlight -= 1
                 }
             }
-            for tail in try converter.finish() {
-                try Task.checkCancellation()
-                guard playbackGeneration == token else { throw CancellationError() }
-                try PCMUtilities.isolate(tail, side: selectedSide)
-                if let replayPCM {
-                    try replayPCM.append(tail)
-                    continue
-                }
-                try validateRoute()
-                if !emitted { onFirstBufferScheduled?() }
-                emitted = true
-                schedule(tail, completion: completions.continuation)
-                scheduledCount += 1
-                if scheduledCount >= 4 {
-                    guard try await completionIterator.next() != nil else { throw CancellationError() }
-                    scheduledCount -= 1
-                }
-            }
-            if let buffer = replayPCM?.buffer {
-                try Task.checkCancellation()
-                guard playbackGeneration == token else { throw CancellationError() }
-                try validateRoute()
-                schedule(buffer, completion: completions.continuation)
-                emitted = true
-                scheduledCount = 1
-                onFirstBufferScheduled?()
-            }
-            while scheduledCount > 0 {
+            while inFlight > 0 {
                 try Task.checkCancellation()
                 guard playbackGeneration == token,
                       try await completionIterator.next() != nil else { throw CancellationError() }
-                scheduledCount -= 1
+                inFlight -= 1
             }
-            guard emitted else { throw PipelineError.message("系统语音没有生成可播放的声音。") }
         } catch {
             if playbackGeneration == token { stopSpeech() }
             throw error
@@ -313,13 +270,6 @@ final class AudioController {
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
         try? session.setActive(false, options: .notifyOthersOnDeactivation)
-    }
-
-    private func schedule(_ buffer: AVAudioPCMBuffer, completion: AsyncThrowingStream<Void, Error>.Continuation) {
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
-            completion.yield(())
-        }
-        if !player.isPlaying { player.play() }
     }
 
     private func configureOutputGraph() throws {
