@@ -61,7 +61,8 @@ final class SpeechRecognizer {
         }
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
-        let currentAnalyzer = SpeechAnalyzer(modules: [transcriber])
+        let options: SpeechAnalyzer.Options? = lowLatency ? .init(priority: .userInitiated, modelRetention: .lingering) : nil
+        let currentAnalyzer = SpeechAnalyzer(modules: [transcriber], options: options)
         analyzer = currentAnalyzer
         try await currentAnalyzer.prepareToAnalyze(in: format)
         try Task.checkCancellation()
@@ -84,7 +85,7 @@ final class SpeechRecognizer {
                         }
                     }
                     onResult(RecognitionUpdate(text: String(result.text.characters), isFinal: result.isFinal,
-                                               start: start, end: end, boundaries: boundaries))
+                                               start: start, end: end, boundaries: boundaries, capturedSeconds: audio.capturedSeconds))
                 }
                 guard !Task.isCancelled, self?.generation == token else { return }
                 onError(PipelineError.message("语音分析已结束，请重新开始听译。"))

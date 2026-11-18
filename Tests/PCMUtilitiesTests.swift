@@ -152,6 +152,20 @@ final class PCMUtilitiesTests: XCTestCase {
         XCTAssertEqual(replay.buffer?.frameLength, 16)
     }
 
+    func testLivePCMOverrunIsReportedAsRecoverableSpeechBacklog() async throws {
+        let part = try buffer(frames: 16_000)
+        let pipe = SpeechPCMProducer.Stream.makeStream(bufferingPolicy: .bufferingOldest(1))
+        let producer = SpeechPCMProducer(format: part.format, side: .both, live: true, continuation: pipe.continuation)
+        producer.receive(part)
+        var reader = pipe.stream.makeAsyncIterator()
+        do {
+            while let _ = try await reader.next() {}
+            XCTFail("Expected speech backlog")
+        } catch {
+            XCTAssertEqual(error as? PipelineError, .synthesisBacklog)
+        }
+    }
+
     func testLiveSpeechDoesNotWaitForHeadphonePlaybackBetweenTinyFragments() async throws {
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
         let pipe = SpeechPCMProducer.Stream.makeStream()

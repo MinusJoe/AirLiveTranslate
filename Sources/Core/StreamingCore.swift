@@ -11,6 +11,7 @@ struct RecognitionUpdate: Sendable {
     let start: Double
     let end: Double
     var boundaries: [TextAudioBoundary] = []
+    var capturedSeconds: Double?
 }
 
 struct CommittedSegment: Sendable {
@@ -43,6 +44,7 @@ struct StreamingCommitter {
     private var candidate = ""
     private var candidateSince: TimeInterval = 0
     private var candidateCount = 0
+    private var firstTimedObservation: (text: String, audioEnd: Double, inputEnd: Double, uptime: TimeInterval)?
     var pendingIDs: [UUID] { committedIDs }
 
     init(lowLatencyEnabled: Bool = true, language: AppLanguage = .english,
@@ -110,6 +112,7 @@ struct StreamingCommitter {
         guard let boundary = clause ?? sentence else {
             candidate = ""
             candidateCount = 0
+            firstTimedObservation = nil
             return batch
         }
         let prefix = String(characters[committedCount..<boundary])
@@ -117,12 +120,31 @@ struct StreamingCommitter {
             candidate = prefix
             candidateSince = now
             candidateCount = 1
+            firstTimedObservation = nil
         } else {
             candidateCount += 1
         }
-        guard candidateCount >= confirmations, now - candidateSince >= stabilitySeconds,
-              let audioEnd = reliableEnd(at: boundary, text: characters, boundaries: update.boundaries),
-              audioEnd > max(update.start, committedThrough), update.end - audioEnd >= 0.15 else { return batch }
+        guard let audioEnd = reliableEnd(at: boundary, text: characters, boundaries: update.boundaries),
+              audioEnd > max(update.start, committedThrough), update.end - audioEnd >= 0.15 else {
+            firstTimedObservation = nil
+            return batch
+        }
+        let stable = candidateCount >= confirmations && now - candidateSince >= stabilitySeconds
+        var growingEnglish = false
+        if language == .english, characters[boundary...].contains(where: \.isLetter) {
+            if let first = firstTimedObservation,
+               abs(first.audioEnd - audioEnd) <= 0.05, update.text.hasPrefix(first.text),
+               update.end >= first.inputEnd {
+                let extensionText = update.text.dropFirst(first.text.count)
+                growingEnglish = now - first.uptime >= 0.20 && update.end - first.inputEnd >= 0.18
+                    && update.end - audioEnd >= 0.30 && extensionText.contains(where: \.isLetter)
+            } else {
+                firstTimedObservation = (update.text, audioEnd, update.end, now)
+            }
+        } else {
+            firstTimedObservation = nil
+        }
+        guard stable || growingEnglish else { return batch }
         let segment = SpeechSegment(text: ClauseBoundary.fragment(prefix),
                                     start: max(update.start, committedThrough), end: audioEnd, committedAtUptime: now)
         batch.segments.append(CommittedSegment(segment: segment, isProvisional: true, subtitleOnly: false))
@@ -131,6 +153,7 @@ struct StreamingCommitter {
         committedThrough = audioEnd
         candidate = ""
         candidateCount = 0
+        firstTimedObservation = nil
         batch.draft = ClauseBoundary.fragment(String(characters.dropFirst(boundary)))
         return batch
     }
@@ -143,6 +166,7 @@ struct StreamingCommitter {
         revisionSeen = false
         candidate = ""
         candidateCount = 0
+        firstTimedObservation = nil
     }
 
     private func sentenceBoundary(in text: [Character], after start: Int) -> Int? {
@@ -159,6 +183,9 @@ struct StreamingCommitter {
             let letters = candidate.filter(\.isLetter).count
             let cjk = candidate.unicodeScalars.contains { (0x3040...0x30FF).contains($0.value) || (0x3400...0x9FFF).contains($0.value) }
             let words = candidate.split(whereSeparator: { $0.isWhitespace }).count
+            if language == .english, words <= 2,
+               ["yes", "thank you", "of course", "i agree", "that's right", "that’s right"].contains(
+                candidate.dropLast().trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) { return index + 1 }
             if letters >= 6 && (cjk || words >= 3) { return index + 1 }
         }
         return nil
@@ -192,7 +219,7 @@ struct SpeechPlaybackQueue {
     private(set) var items: [SpeechJob] = []
     let capacity: Int
     let durationLimit: Double
-    init(capacity: Int = 4, durationLimit: Double = 12) {
+    init(capacity: Int = 16, durationLimit: Double = 12) {
         self.capacity = max(1, capacity)
         self.durationLimit = max(1, durationLimit)
     }
@@ -200,6 +227,8 @@ struct SpeechPlaybackQueue {
         items.reduce(0) { $0 + ($1.captionID == nil ? min(durationLimit, $1.estimatedSeconds) : $1.estimatedSeconds) }
     }
     mutating func append(_ job: SpeechJob) -> [SpeechJob] {
+        guard job.text.count <= ReplayPolicy.maximumCaptionCharacters,
+              job.estimatedSeconds.isFinite, job.estimatedSeconds > 0 else { return [job] }
         if job.captionID == nil {
             // One urgent correction notice is enough; never let ordinary translations evict it.
             guard !items.contains(where: { $0.captionID == nil }) else { return [] }
@@ -208,7 +237,9 @@ struct SpeechPlaybackQueue {
             items.append(job)
         }
         var omitted: [SpeechJob] = []
-        while items.count > capacity || estimatedDuration > durationLimit {
+        // Budget the wait until the last queued item can START. Its own speaking
+        // time doesn't delay it. The playback worker separately checks actual age.
+        while items.count > capacity || items.dropLast().reduce(0, { $0 + $1.estimatedSeconds }) > durationLimit {
             guard let index = items.firstIndex(where: { $0.captionID != nil }) else { break }
             omitted.append(items.remove(at: index))
         }
@@ -243,6 +274,8 @@ enum SpeechPacing {
 }
 
 struct ProcessingMetrics: Sendable {
+    var recognitionLagSeconds: Double?
+    var commitLagSeconds: Double?
     var translationSeconds: Double?
     var playbackQueueSeconds: Double?
     var firstBufferScheduledSeconds: Double?

@@ -124,7 +124,7 @@ final class SpeechPCMProducer: @unchecked Sendable {
         switch continuation.yield(SpeechPlaybackPacket(buffer: buffer, isFinal: final)) {
         case .enqueued: break
         case .terminated: throw CancellationError()
-        case .dropped: throw PipelineError.message("语音合成积压，已停止播放。")
+        case .dropped: throw PipelineError.synthesisBacklog
         @unknown default: throw PipelineError.message("语音输出不可用。")
         }
     }

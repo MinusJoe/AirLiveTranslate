@@ -81,6 +81,12 @@ struct SettingsView: View {
                     LabeledContent("等待翻译", value: "\(model.pendingCount) 段")
                     LabeledContent("等待播报", value: "\(model.pendingSpeechCount) 段")
                     LabeledContent("实时跳过 / 拥塞未播累计", value: "\(model.skippedAudioCount) 段")
+                    if let seconds = model.latestMetrics.recognitionLagSeconds {
+                        Text("收音进度领先最近识别片尾：\(seconds, specifier: "%.2f") 秒").font(.caption)
+                    }
+                    if let seconds = model.latestMetrics.commitLagSeconds {
+                        Text("最近分句从片尾到提交：约 \(seconds, specifier: "%.2f") 秒").font(.caption)
+                    }
                     if let seconds = model.latestMetrics.translationSeconds {
                         Text("最近翻译执行：\(seconds, specifier: "%.2f") 秒").font(.caption)
                     }

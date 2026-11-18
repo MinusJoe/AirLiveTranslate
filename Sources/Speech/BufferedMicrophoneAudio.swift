@@ -12,8 +12,15 @@ final class BufferedMicrophoneAudio: @unchecked Sendable {
     private var head = 0
     private var count = 0
     private var frames = 0
+    private var acceptedFrames: Int64 = 0
     private var closed = false
     private var failure: PipelineError?
+
+    var capturedSeconds: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return Double(acceptedFrames) / format.sampleRate
+    }
 
     init(format: AVAudioFormat, seconds: Double = 15, byteLimit: Int = 16 * 1024 * 1024, blockLimit: Int = 4096) {
         self.format = format
@@ -39,6 +46,7 @@ final class BufferedMicrophoneAudio: @unchecked Sendable {
             slots[(head + count) % slots.count] = owned
             count += 1
             frames += length
+            acceptedFrames += Int64(length)
             lock.unlock()
             wake.continuation.yield(())
             return nil

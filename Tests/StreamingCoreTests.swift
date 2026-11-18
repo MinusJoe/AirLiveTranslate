@@ -42,13 +42,36 @@ final class StreamingCoreTests: XCTestCase {
         for index in 1..<5 { XCTAssertTrue(committer.process(late, now: Double(index)).segments.isEmpty) }
     }
 
-    func testOversizedSpeechIsExplicitlyOmittedAndNotQueuedForever() {
-        let id = UUID()
-        let job = SpeechJob(id: UUID(), captionID: id, text: "long", committedAtUptime: 0,
-                            queuedAtUptime: 1, estimatedSeconds: 13)
+    private func job(_ seconds: Double, text: String = "translation") -> SpeechJob {
+        SpeechJob(id: UUID(), captionID: UUID(), text: text, committedAtUptime: 0,
+                  queuedAtUptime: 1, estimatedSeconds: seconds)
+    }
+
+    func testLongUtteranceCanStartOnAnIdleQueue() {
         var queue = SpeechPlaybackQueue()
-        XCTAssertEqual(queue.append(job).map(\.captionID), [id])
-        XCTAssertTrue(queue.items.isEmpty)
+        let long = job(13)
+        XCTAssertTrue(queue.append(long).isEmpty)
+        XCTAssertEqual(queue.pop()?.id, long.id)
+    }
+
+    func testShortBurstKeepsOrderAndOnlyRealBacklogEvicts() {
+        var queue = SpeechPlaybackQueue()
+        let burst = (0..<8).map { _ in job(1) }
+        for piece in burst { XCTAssertTrue(queue.append(piece).isEmpty) }
+        let long = job(10)
+        XCTAssertTrue(queue.append(long).isEmpty)
+        let newest = job(1)
+        XCTAssertEqual(queue.append(newest).map(\.id), burst.prefix(6).map(\.id))
+        XCTAssertEqual(queue.items.map(\.id), Array(burst.suffix(2)).map(\.id) + [long.id, newest.id])
+    }
+
+    func testUnplayableTextDoesNotEvictOtherSpeech() {
+        var queue = SpeechPlaybackQueue()
+        let valid = job(1)
+        let oversized = job(15, text: String(repeating: "字", count: 1801))
+        _ = queue.append(valid)
+        XCTAssertEqual(queue.append(oversized).first?.id, oversized.id)
+        XCTAssertEqual(queue.pop()?.id, valid.id)
     }
 
     func testTranslationLaneCanProgressWhileSpeechStillHasPendingWork() throws {

@@ -12,6 +12,9 @@ enum ClauseBoundary {
     // list, and silence after a comma, are insufficient evidence to speak the left.
     private static let englishRestart = rule(#"\b(?:(?:and(?:\s+then)?|but|so|then|however|meanwhile)\s+)?(?:(?:i|we|you|they|he|she|it|(?:the|our|their)\s+(?:team|client|customer|manager|report|meeting|project))\s+(?:will|would|can|could|should|must|may|have|has|had|are|were|is|was|need(?:s)?|plan(?:s)?|[a-z]{3,}ed|sent|made|took|began)\s+|(?:we|you|they|he|she|i|it)['’](?:ll|re|ve|d)\s+)[a-z]+"#)
     private static let englishPredicate = rule(#"\b(?:(?:i|we|you|they|he|she|it|(?:the|our|their)\s+[a-z]+)\s+(?:(?:just|already|finally|also)\s+)*(?:[a-z]{3,}ed|sent|met|won|lost|wrote|built|bought|made|did|went|ran|got|found|took|paid|sold|gave|chose|left|came|became)|(?:is|are|was|were|am|can|will|have|has|had)\s+[a-z]+)\b"#)
+    // A present-tense verb with a noun phrase, e.g. "we need more time".
+    // Keep complements ("we need to ...") and open-ended lists out of this path.
+    private static let englishPresentObject = rule(#"\b(?:i|we|you|they|he|she)\s+(?:needs?|wants?|uses?|prefers?|expects?)\s+(?:more|less|extra|another|the|our|your|this|that)\s+[a-z]+(?:\s+[a-z]+){0,2}$"#)
     private static let englishDependent = rule(#"\b(?:if|unless|whether|although|because|until|when|while|either|between|that|which|who|whose|not\s+only|as\s+long\s+as)\b"#)
     private static let englishOpenEnd = rule(#"(?:\b(?:a|an|the|my|your|our|their|this|these|to|of|for|from|at|by|with|into|about|on|as|than|and|but|or|not|no|only|is|are|was|were|can|could|will|would|should|must|have|has|had|think|thought|said|told|believe|believed|know|knew|sure|mean)|[-+.$£¥€])$"#)
     private static let englishStandaloneEnd = rule(#"\b(?:ready|complete|completed|finished|done|approved|available|closed|open|over|started|delivered|arrived)$"#)
@@ -58,7 +61,8 @@ enum ClauseBoundary {
             switch language {
             case .english:
                 let words = clause.split(whereSeparator: \.isWhitespace)
-                guard words.count >= 3, matches(englishPredicate, clause), !matches(englishDependent, clause),
+                guard words.count >= 3, matches(englishPredicate, clause) || matches(englishPresentObject, clause),
+                      !matches(englishDependent, clause),
                       !matches(englishOpenEnd, clause) else { continue }
                 let marker = text[range].lowercased().split(whereSeparator: \.isWhitespace).first
                 let explicit = ["and", "but", "so", "then", "however", "meanwhile"].contains(String(marker ?? ""))

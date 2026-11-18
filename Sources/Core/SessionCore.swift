@@ -132,12 +132,14 @@ enum PipelineError: LocalizedError, Equatable {
     case backlog
     case staleSegment
     case oversizedSegment
+    case synthesisBacklog
     var errorDescription: String? {
         switch self {
         case .message(let text): return text
         case .backlog: return "译文已积压，已暂停收音。未播完的片段已标记，请稍后重新开始。"
         case .staleSegment: return "译文落后超过 20 秒，已暂停，避免继续播放过时内容。"
         case .oversizedSegment: return "识别片段过长，已暂停。请让对方适当停顿后重试。"
+        case .synthesisBacklog: return "语音合成缓冲已满，这段译音未播完。"
         }
     }
 }

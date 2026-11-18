@@ -7,6 +7,40 @@ final class ClauseBoundaryTests: XCTestCase {
                           boundaries: [TextAudioBoundary(characterOffset: prefix.count, audioEnd: 2)])
     }
 
+    func testAdvancingEnglishCanTranslateBeforeTheThirdUpdate() {
+        let clause = "we need more time"
+        var engine = StreamingCommitter()
+        let first = partial(clause + " but we can finish", prefix: clause, end: 2.5)
+        let next = partial(first.text + " today", prefix: clause, end: 2.8)
+        XCTAssertTrue(engine.process(first, now: 10).segments.isEmpty)
+        XCTAssertEqual(engine.process(next, now: 10.25).segments.map { $0.segment.text }, [clause])
+        let final = RecognitionUpdate(text: next.text, isFinal: true, start: 0, end: 3)
+        XCTAssertEqual(engine.process(final, now: 11).segments.map { $0.segment.text }, ["but we can finish today"])
+    }
+
+    func testEnglishShortcutRequiresAdvancingSpeechAndAnUnchangedTimedPrefix() {
+        let lhs = "we need more time"
+        let initial = partial(lhs + " but we can finish", prefix: lhs, end: 2.5)
+        let changedTime = RecognitionUpdate(text: initial.text + " today", isFinal: false, start: 0, end: 3,
+                                           boundaries: [.init(characterOffset: lhs.count, audioEnd: 2.2)])
+        for next in [initial, changedTime, partial(initial.text + " today", prefix: lhs, end: 2.5),
+                     partial(initial.text, prefix: lhs, end: 3),
+                     partial(lhs + " but we can start tomorrow", prefix: lhs, end: 3)] {
+            var engine = StreamingCommitter()
+            _ = engine.process(initial, now: 0)
+            XCTAssertTrue(engine.process(next, now: 0.25).segments.isEmpty)
+        }
+    }
+
+    func testBriefEnglishAnswerAndNumberAbbreviation() {
+        for (left, tail, expected) in [("Thank you.", " Please", true), ("No.", " 12", false)] {
+            var engine = StreamingCommitter()
+            _ = engine.process(partial(left + tail, prefix: left, end: 2.5), now: 0)
+            let next = partial(left + tail + " was next", prefix: left, end: 3)
+            XCTAssertEqual(engine.process(next, now: 0.25).segments.count, expected ? 1 : 0)
+        }
+    }
+
     func testFastContinuousSpeechEmitsAClauseWithoutPauseOrPunctuation() {
         for (language, first, next) in [
             (AppLanguage.english, "we finished the first round of testing", " and we can start"),

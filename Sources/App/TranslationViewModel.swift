@@ -309,7 +309,7 @@ final class TranslationViewModel: ObservableObject {
                 guard self.epoch.accepts(token) else { return }
                 self.state = .listening
                 self.phase = requestedLowLatency ? "正在听译，稳定的句子或分句可以先播。" : "正在听译，等待识别定稿。"
-                self.message = "收音与处理仅在本机进行。已配置锁屏音频，实际连续性待真机验证；来电或路由变化会暂停。"
+                self.message = "开始听译后可以锁屏继续收听。来电中断或耳机断开后，请回到 App 恢复听译。"
             } catch {
                 guard self.epoch.accepts(token), !Task.isCancelled else { return }
                 self.snapshot = self.audio.snapshot
@@ -509,7 +509,14 @@ final class TranslationViewModel: ObservableObject {
             return
         }
         let batch = committer.process(recognition, now: ProcessInfo.processInfo.systemUptime)
-        draft = batch.draft
+        if let captured = recognition.capturedSeconds, !recognition.text.isEmpty, recognition.end.isFinite {
+            latestMetrics.recognitionLagSeconds = max(0, captured - recognition.end)
+            if let committed = batch.segments.last {
+                latestMetrics.commitLagSeconds = max(0, captured - committed.segment.end)
+            }
+        }
+        if draft != batch.draft { draft = batch.draft }
+        guard !batch.segments.isEmpty || !batch.revisedIDs.isEmpty || !batch.confirmedIDs.isEmpty else { return }
         if !batch.revisedIDs.isEmpty { revoke(batch.revisedIDs, token: token) }
         for id in batch.confirmedIDs { update(id) { $0.isProvisional = false } }
         do {
@@ -600,6 +607,8 @@ final class TranslationViewModel: ObservableObject {
                     }
                     if self.subtitleOnlyIDs.contains(segment.id) {
                         self.update(segment.id) { $0.status = .corrected }
+                    } else if text.count > ReplayPolicy.maximumCaptionCharacters {
+                        self.markUnspoken(segment.id, reason: "译文超过单次播报的字数上限，已保留完整字幕。")
                     } else if segment.committedAtUptime < self.playbackCutoffUptime || now - segment.committedAtUptime > 15 {
                         self.markUnspoken(segment.id, reason: "译文已过时或已跳到当前，仅保留字幕。")
                     } else {
@@ -623,7 +632,7 @@ final class TranslationViewModel: ObservableObject {
 
     private func enqueueSpeech(_ job: SpeechJob, token: UInt64) {
         for omitted in speechQueue.append(job) {
-            if let id = omitted.captionID { markUnspoken(id, reason: "播报积压超过上限，仅保留字幕。") }
+            if let id = omitted.captionID { markUnspoken(id, reason: "为跟上当前讲话，已跳过这段译音，可在「补听」中收听。") }
         }
         pendingSpeechCount = speechQueue.items.count
         drainSpeech(token: token)
@@ -649,11 +658,19 @@ final class TranslationViewModel: ObservableObject {
                     self.latestMetrics.playbackQueueSeconds = now - job.queuedAtUptime
                     let rate = SpeechPacing.rate(base: Float(self.speakingRate), queuedSeconds: self.speechQueue.estimatedDuration,
                                                  adaptive: self.adaptiveRateEnabled)
-                    try await self.audio.speak(job.text, language: self.target, rate: rate, onFirstBufferScheduled: { [weak self] in
-                        guard let self, self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
-                        if let id = job.captionID { self.scheduledAudioIDs.insert(id) }
-                        self.latestMetrics.firstBufferScheduledSeconds = ProcessInfo.processInfo.systemUptime - job.committedAtUptime
-                    })
+                    do {
+                        try await self.audio.speak(job.text, language: self.target, rate: rate, onFirstBufferScheduled: { [weak self] in
+                            guard let self, self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
+                            if let id = job.captionID { self.scheduledAudioIDs.insert(id) }
+                            self.latestMetrics.firstBufferScheduledSeconds = ProcessInfo.processInfo.systemUptime - job.committedAtUptime
+                        })
+                    } catch PipelineError.synthesisBacklog {
+                        guard self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
+                        guard let id = job.captionID else { throw PipelineError.synthesisBacklog }
+                        self.markUnspoken(id, reason: "这段译音未播完，可在「补听」中重新收听。")
+                        self.activeSpeechID = nil
+                        continue
+                    }
                     try Task.checkCancellation()
                     guard self.epoch.accepts(token), self.speechEpoch.accepts(playbackToken) else { return }
                     if let id = job.captionID { self.update(id) { $0.status = .complete } }

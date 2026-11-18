@@ -22,6 +22,7 @@ final class BufferedMicrophoneTests: XCTestCase {
         }
         // Simulate four seconds of model preparation, including reuse of the tap's memory.
         for n in 0..<192 { capture(n) }
+        XCTAssertEqual(queue.capturedSeconds, 192 * 1024.0 / 48_000, accuracy: 0.000001)
         var feed = CapturedSpeechInput(audio: queue, format: fmt).makeAsyncIterator()
         for expected in 0..<224 {
             if expected < 32 { capture(192 + expected) }
@@ -31,6 +32,7 @@ final class BufferedMicrophoneTests: XCTestCase {
             XCTAssertEqual(b.floatChannelData?[0][0], Float(expected))
             XCTAssertEqual(b.floatChannelData?[0][1023], Float(expected))
         }
+        XCTAssertEqual(queue.capturedSeconds, 224 * 1024.0 / 48_000, accuracy: 0.000001)
         queue.discard()
     }
 
