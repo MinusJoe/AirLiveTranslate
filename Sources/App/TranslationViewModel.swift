@@ -213,7 +213,7 @@ final class TranslationViewModel: ObservableObject {
                 }
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
-                self.snapshot = try await self.audio.configure(source: requestedSource)
+                self.snapshot = try await self.audio.configure(source: requestedSource, probeStereo: true)
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
                 self.audio.stop()
@@ -269,7 +269,7 @@ final class TranslationViewModel: ObservableObject {
                 }
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
-                self.snapshot = try await self.audio.configure(source: requestedCapture)
+                self.snapshot = try await self.audio.configure(source: requestedCapture, side: requestedSide)
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
                 let capture = try self.audio.start(side: requestedSide, onLevel: { [weak self] level in
@@ -277,6 +277,7 @@ final class TranslationViewModel: ObservableObject {
                     self.inputLevel = level
                 }, onRouteFailure: { [weak self] reason in
                     guard let self, self.epoch.accepts(token) else { return }
+                    self.snapshot = self.audio.snapshot
                     self.stop(reason: reason, failed: true)
                 })
                 self.state = .buffering
@@ -438,6 +439,7 @@ final class TranslationViewModel: ObservableObject {
                 guard self.replayProgress.accepts(token), self.isReplaying else { return }
                 let replaySnapshot = try await self.audio.configurePlayback(side: side) { [weak self] reason in
                     guard let self, self.replayProgress.accepts(token) else { return }
+                    self.snapshot = self.audio.snapshot
                     self.stopReplay(reason: "重播已停止：\(reason) 实时收音未恢复。")
                 }
                 try Task.checkCancellation()

@@ -85,6 +85,16 @@
 			"isa" = "PBXBuildFile";
 			"fileRef" = "9B8245D18A0E9BD4ED412E12";
 		};
+		"8BAE41B5EFFB264275979BAE" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Sources/Core/AudioRoutePolicy.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"8876414D8486CB48739D6C24" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "8BAE41B5EFFB264275979BAE";
+		};
 		"F1FC3FC92A603C505477A8E9" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "sourcecode.swift";
@@ -154,6 +164,16 @@
 		"72BF3E051DAFB397017AEFAD" = {
 			"isa" = "PBXBuildFile";
 			"fileRef" = "6C56ADABCAF0C8D0D4E4A9A6";
+		};
+		"C125FC2004A563F9C3B0C9FB" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Tests/AudioRoutePolicyTests.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"7617A340DCC87DF92434A7A8" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "C125FC2004A563F9C3B0C9FB";
 		};
 		"BCCB93C9E30FE151A738F96C" = {
 			"isa" = "PBXFileReference";
@@ -315,6 +335,7 @@
 				"9493F601C17924F9AFD4841F",
 				"4F84BB61021F39567A4AF376",
 				"9B8245D18A0E9BD4ED412E12",
+				"8BAE41B5EFFB264275979BAE",
 				"F1FC3FC92A603C505477A8E9",
 				"C59771D9B9AAE920B2121069",
 				"8AE67E1059FDAAD70E8BDB81",
@@ -329,6 +350,7 @@
 		"6DC4FAD667A85B8567F612FB" = {
 			"isa" = "PBXGroup";
 			"children" = (
+				"C125FC2004A563F9C3B0C9FB",
 				"BCCB93C9E30FE151A738F96C",
 				"0DF688FB27C4257DBA072DF5",
 				"BC8B4EDBE92E92A205532CE4",
@@ -375,6 +397,7 @@
 				"1F62CF264A11BB514D3FB7D2",
 				"431301AC372EBC517749CEFB",
 				"B766988D2EEEED196D34C8C8",
+				"8876414D8486CB48739D6C24",
 				"9A77735F4C661A8035575E3B",
 				"75C7628FAB8BEC241243BCE1",
 				"ADB68426660F8DCF12742E2A",
@@ -405,6 +428,7 @@
 			"isa" = "PBXSourcesBuildPhase";
 			"buildActionMask" = 2147483647;
 			"files" = (
+				"7617A340DCC87DF92434A7A8",
 				"0BC8596E6D41483A4295DBAC",
 				"818CD9D330FC85DBDD43B8E6",
 				"2A45868A54A85B07444F790A",
@@ -488,7 +512,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.4";
+				"MARKETING_VERSION" = "0.1.5";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -512,7 +536,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.4";
+				"MARKETING_VERSION" = "0.1.5";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -545,7 +569,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.4";
+				"MARKETING_VERSION" = "0.1.5";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -567,7 +591,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.4";
+				"MARKETING_VERSION" = "0.1.5";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
