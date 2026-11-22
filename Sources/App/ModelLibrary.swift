@@ -73,7 +73,7 @@ final class ModelLibrary: ObservableObject {
         states[kind] = error.map { .failed($0.localizedDescription) } ?? .installed
     }
 
-    private func handler(_ kind: ModelResource, _ id: UUID) -> FluidAudio.ProgressHandler {
+    private func handler(_ kind: ModelResource, _ id: UUID) -> ProgressHandler {
         { [weak self] update in
             let label: String
             switch update.phase {
