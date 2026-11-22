@@ -18,15 +18,22 @@ final class AudioController {
     private var engine = AVAudioEngine()
     private var player = AVAudioPlayerNode()
     private let synthesizer = AVSpeechSynthesizer()
-    private var captureContinuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation?
-    private var synthesisContinuation: AsyncThrowingStream<AVAudioPCMBuffer, Error>.Continuation?
+    private var capturedAudio: BufferedMicrophoneAudio?
+    private var synthesisContinuation: SpeechPCMProducer.Stream.Continuation?
     private var playbackCompletionContinuation: AsyncThrowingStream<Void, Error>.Continuation?
     private var observers: [NSObjectProtocol] = []
+    private var ownsActiveSession = false
+    private var expectedHardwareOutput: AVAudioFormat?
+    private var hasScheduledSpeech = false
     private var tapInstalled = false
     private var playbackFormat: AVAudioFormat?
     private var expectedInputUID: String?
     private var expectedOutputUID: String?
     private var selectedSource: CaptureSource = .headset
+    private var captureRequired = false
+    private var phoneInputOnly = false
+    private var requiresFarField = false
+    private var partnerSpeaker = false
     private var selectedSide: OutputSide = .both
     private var playbackGeneration = UUID()
     private var routeGeneration = UUID()
@@ -36,109 +43,215 @@ final class AudioController {
 
     var inputFormat: AVAudioFormat { engine.inputNode.outputFormat(forBus: 0) }
 
+    static var headphonesSelected: Bool {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        return outputs.count == 1 && outputs.first.map(Self.isHeadphone) == true
+    }
+
     static func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in
             AVAudioApplication.requestRecordPermission { granted in continuation.resume(returning: granted) }
         }
     }
 
-    func configure(source: CaptureSource) async throws -> AudioSnapshot {
+    func configure(source: CaptureSource, side: OutputSide = .both, probeStereo: Bool = false,
+                   farField: Bool = true) async throws -> AudioSnapshot {
         try Task.checkCancellation()
+        let originalOutput = session.currentRoute.outputs.first
         stop()
+        selectedSide = side
         snapshot = AudioSnapshot()
         selectedSource = source
+        captureRequired = true
+        requiresFarField = source == .headset && farField
         var options: AVAudioSession.CategoryOptions = []
-        if source == .headset {
+        if requiresFarField {
             guard #available(iOS 26.2, *) else {
                 throw PipelineError.message("耳机远场收音需要 iOS 26.2 或更新版本。可主动选择手机麦克风备用。")
             }
             options = [.allowBluetoothHFP, .farFieldInput]
+        } else if source == .headset {
+            options = [.allowBluetoothHFP]
         } else {
             options = [.allowBluetoothA2DP]
         }
         try session.setCategory(.playAndRecord, mode: .default, options: options)
         try session.setActive(true)
-        let inputs = session.availableInputs ?? []
-        let preferred: AVAudioSessionPortDescription?
-        if source == .headset {
-            preferred = inputs.first { $0.portType == .bluetoothHFP || $0.portType == .bluetoothLE }
-        } else {
-            preferred = inputs.first { $0.portType == .builtInMic }
+        ownsActiveSession = true
+        let bluetoothHint: RoutePortIdentity? = originalOutput.flatMap { port in
+            source == .headset && Self.isBluetooth(port) ? Self.identity(port) : nil
         }
-        guard let preferred else {
-            throw PipelineError.message(source == .headset ? "没有可用的蓝牙耳机麦克风，请先连接 AirPods。" : "没有可用的手机麦克风。")
+        var negotiation = CaptureRouteNegotiation(selectedHeadphones: bluetoothHint)
+        let deadline = ProcessInfo.processInfo.systemUptime + 5
+        var triedStereo = false
+        var preferenceError: String?
+        repeat {
+            try Task.checkCancellation()
+            let now = ProcessInfo.processInfo.systemUptime
+            let route = session.currentRoute
+            let inputs = (session.availableInputs ?? []).filter { Self.accepts($0, source: source) }
+            let active = route.inputs.count == 1 ? route.inputs.first : nil
+            let matched = active.flatMap { Self.accepts($0, source: source) ? Self.identity($0) : nil }
+            let output = route.outputs.count == 1 ? route.outputs.first : nil
+            let selected = negotiation.choose(available: inputs.map(Self.identity), active: matched,
+                                              output: output.map(Self.identity))
+            if let selected, let port = inputs.first(where: { $0.uid == selected.uid }),
+               negotiation.shouldRequest(selected.uid, activeUID: matched?.uid, now: now) {
+                do { try session.setPreferredInput(port); preferenceError = nil }
+                catch { preferenceError = error.localizedDescription }
+            }
+            let privateOutput = output.flatMap { Self.isHeadphone($0) ? $0.uid : nil }
+            if let selected, matched?.uid == selected.uid, privateOutput != nil,
+               (side != .both || probeStereo), !triedStereo {
+                triedStereo = true
+                requestStereoIfSupported()
+            }
+            let ok = (!requiresFarField || Self.farFieldEnabled(active)) &&
+                (side == .both || (privateOutput != nil && inspectRoute().output.permits(side)))
+            if negotiation.ready(input: matched?.uid, output: privateOutput, capabilitiesOK: ok, now: now) {
+                expectedInputUID = matched?.uid
+                expectedOutputUID = privateOutput
+                break
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        } while ProcessInfo.processInfo.systemUptime < deadline
+        try Task.checkCancellation()
+        snapshot = inspectRoute()
+        if expectedInputUID == nil {
+            let reason: String
+            if negotiation.target == nil {
+                reason = "无法唯一确定所选麦克风。请在系统音频输出中选中所戴耳机，再点“检查耳机”。"
+            } else if session.currentRoute.inputs.first?.uid != negotiation.target?.uid {
+                reason = "系统未切换到“" + (negotiation.target?.name ?? source.name) + "”。"
+            } else if !snapshot.output.isHeadphones {
+                reason = "请将系统音频输出切换到耳机。"
+            } else if requiresFarField && !snapshot.farFieldEnabled {
+                reason = snapshot.farFieldSupported ? "系统尚未启用耳机远场收音。" : "当前耳机路由未提供远场收音。"
+            } else if !snapshot.output.permits(side) {
+                reason = "当前录放音路由未提供指定耳侧，请在设置中选择双耳后重试。"
+            } else {
+                reason = "麦克风或耳机路由尚未稳定，请重新检查。"
+            }
+            let details = [reason, routeSummary(), preferenceError].compactMap { $0 }.joined(separator: " ")
+            snapshot.detail = details
+            throw PipelineError.message(details)
         }
-        try session.setPreferredInput(preferred)
-        // A preference can fail on HFP mono routes. Actual output capability is checked below.
-        try? session.setPreferredOutputNumberOfChannels(2)
-        for _ in 0..<12 {
+        try validateRoute()
+        try configureOutputGraph()
+        snapshot.detail = requiresFarField ? "耳机远场收音已实际启用" : "所选麦克风已启用"
+        return snapshot
+    }
+
+    /// Face-to-face on a bare phone has no playback graph while recording.
+    /// Loudspeaker playback is a separate operation after the tap has been removed.
+    func configurePhoneMicrophone() async throws {
+        try Task.checkCancellation()
+        stop()
+        snapshot = AudioSnapshot()
+        selectedSource = .phone
+        selectedSide = .both
+        requiresFarField = false
+        captureRequired = true
+        phoneInputOnly = true
+        try session.setCategory(.record, mode: .default, options: [])
+        try session.setActive(true)
+        ownsActiveSession = true
+        var nextRequest: TimeInterval = 0
+        var observedMic: String?
+        var observedSince: TimeInterval = 0
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            let now = ProcessInfo.processInfo.systemUptime
+            let inputs = session.currentRoute.inputs
+            if inputs.count == 1, let mic = inputs.first, mic.portType == .builtInMic {
+                if observedMic != mic.uid { observedMic = mic.uid; observedSince = now }
+                if now - observedSince >= 0.15 {
+                    expectedInputUID = mic.uid
+                    snapshot.hasBeenChecked = true
+                    snapshot.inputName = mic.portName
+                    snapshot.outputName = "仅收音"
+                    snapshot.detail = "使用 iPhone 麦克风，点喇叭时播放译文。"
+                    try validateRoute()
+                    return
+                }
+            } else { observedMic = nil }
+            if now >= nextRequest, let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }),
+               session.preferredInput?.uid != mic.uid || observedMic == nil {
+                try? session.setPreferredInput(mic)
+                nextRequest = now + 1
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw PipelineError.message("未能启用 iPhone 内置麦克风，请检查输入设备后重试。" + routeSummary())
+    }
+
+    /// Replay never asks for microphone access, creates an input node, or starts a capture tap.
+    func configurePlayback(side: OutputSide, onRouteFailure: @escaping @MainActor (String) -> Void) async throws -> AudioSnapshot {
+        try Task.checkCancellation()
+        stop()
+        snapshot = AudioSnapshot()
+        captureRequired = false
+        selectedSide = side
+        try session.setCategory(.playback, mode: .spokenAudio, options: [])
+        try session.setActive(true)
+        ownsActiveSession = true
+        var triedStereo = false
+        var previousOutput: String?
+        for _ in 0..<50 {
             try Task.checkCancellation()
             let route = session.currentRoute
-            let inputMatches = route.inputs.contains { $0.uid == preferred.uid }
-            var farFieldReady = true
-            if source == .headset {
-                if #available(iOS 26.2, *) {
-                    farFieldReady = route.inputs.first?.bluetoothMicrophoneExtension?.farFieldCapture.isEnabled == true
+            if route.outputs.count == 1, let port = route.outputs.first, Self.isHeadphone(port) {
+                if side != .both && !triedStereo {
+                    triedStereo = true
+                    requestStereoIfSupported()
                 }
+                if previousOutput == port.uid && inspectRoute().output.permits(side) { break }
+                previousOutput = port.uid
+            } else {
+                previousOutput = nil
             }
-            if inputMatches && farFieldReady { break }
             try await Task.sleep(for: .milliseconds(100))
         }
         try Task.checkCancellation()
         snapshot = inspectRoute()
-        guard session.currentRoute.inputs.first?.uid == preferred.uid else {
-            throw PipelineError.message("系统没有启用所选麦克风，已停止。请检查音频路由后重试。")
+        snapshot.inputName = "未启用（仅播放译文）"
+        guard snapshot.output.permits(side) else {
+            throw PipelineError.message("当前输出不是耳机，或无法保证指定耳播放。重播已阻止，请检查耳机设置。")
         }
-        guard snapshot.output.isHeadphones else {
-            throw PipelineError.message("译文输出当前不是耳机，已阻止启动。请用音频输出按钮选择耳机。")
-        }
-        if source == .headset {
-            guard snapshot.farFieldSupported else {
-                throw PipelineError.message("当前耳机路由不支持远场收音。可主动选择手机麦克风备用。")
-            }
-            guard snapshot.farFieldEnabled else {
-                throw PipelineError.message("耳机支持远场收音，但系统未启用，已阻止启动。")
-            }
-        }
-        expectedInputUID = session.currentRoute.inputs.first?.uid
         expectedOutputUID = session.currentRoute.outputs.first?.uid
-
-        let hardware = engine.outputNode.outputFormat(forBus: 0)
-        guard hardware.sampleRate > 0, hardware.channelCount > 0,
-              let format = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate,
-                                        channels: snapshot.output.supportsSingleEar ? 2 : 1) else {
-            throw PipelineError.message("当前耳机播放格式不可用。")
-        }
-        playbackFormat = format
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
-        snapshot.detail = source == .headset ? "耳机远场收音已实际启用" : "已使用你选择的手机麦克风"
+        expectedInputUID = nil
+        try configureOutputGraph()
+        try validateRoute()
+        engine.prepare()
+        try engine.start()
+        try validateRoute()
+        observeRoute(onFailure: onRouteFailure)
+        snapshot.detail = "仅播放已生成译文，麦克风未启用"
         return snapshot
     }
 
     func start(side: OutputSide, onLevel: @escaping @MainActor (Float) -> Void,
                onRouteFailure: @escaping @MainActor (String) -> Void)
-        throws -> AsyncThrowingStream<AVAudioPCMBuffer, Error> {
-        snapshot = inspectRoute()
-        guard snapshot.output.permits(side) else {
-            throw PipelineError.message("当前路由不能保证指定耳播放。请主动选择双耳，或更换支持左右声道的路由。")
+        throws -> BufferedMicrophoneAudio {
+        if !phoneInputOnly {
+            snapshot = inspectRoute()
+            guard snapshot.output.permits(side) else {
+                throw PipelineError.message("当前路由不能保证指定耳播放。请主动选择双耳，或更换支持左右声道的路由。")
+            }
         }
         selectedSide = side
         try validateRoute()
-        let pair = AsyncThrowingStream<AVAudioPCMBuffer, Error>.makeStream(bufferingPolicy: .bufferingOldest(64))
-        captureContinuation = pair.continuation
         let format = inputFormat
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw PipelineError.message("麦克风音频格式无效。")
         }
+        let capture = BufferedMicrophoneAudio(format: format)
+        capturedAudio = capture
         let meter = InputLevelMeter()
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
-            guard let copied = PCMUtilities.copy(buffer) else {
-                pair.continuation.finish(throwing: PipelineError.message("收音缓冲区分配失败。"))
+            if let error = capture.append(buffer) {
+                Task { @MainActor in onRouteFailure(error.localizedDescription) }
                 return
-            }
-            if case .dropped = pair.continuation.yield(copied) {
-                pair.continuation.finish(throwing: PipelineError.message("收音处理积压，已停止，避免静默丢音。"))
             }
             if let level = meter.measure(buffer) {
                 Task { @MainActor in onLevel(level) }
@@ -149,10 +262,11 @@ final class AudioController {
         try engine.start()
         try validateRoute()
         observeRoute(onFailure: onRouteFailure)
-        return pair.stream
+        return capture
     }
 
-    func speak(_ text: String, language: AppLanguage, rate: Float) async throws {
+    func speak(_ text: String, language: AppLanguage, rate: Float,
+               onFirstBufferScheduled: (@MainActor () -> Void)? = nil) async throws {
         try Task.checkCancellation()
         guard let playbackFormat else { throw PipelineError.message("音频尚未启动。") }
         try validateRoute()
@@ -162,71 +276,58 @@ final class AudioController {
         guard text.count <= 1800 else { throw PipelineError.oversizedSegment }
         let token = UUID()
         playbackGeneration = token
-        let pair = AsyncThrowingStream<AVAudioPCMBuffer, Error>.makeStream(bufferingPolicy: .bufferingOldest(512))
-        let completions = AsyncThrowingStream<Void, Error>.makeStream(bufferingPolicy: .bufferingOldest(8))
+        // Bound producer lead by duration (512 × 80 ms in live mode), independent of
+        // the often tiny fragments delivered by AVSpeechSynthesizer.write.
+        let pair = SpeechPCMProducer.Stream.makeStream(bufferingPolicy: .bufferingOldest(512))
+        let completions = AsyncThrowingStream<Void, Error>.makeStream(bufferingPolicy: .bufferingOldest(4))
         playbackCompletionContinuation = completions.continuation
-        var completionIterator = completions.stream.makeAsyncIterator()
-        var scheduledCount = 0
         synthesisContinuation = pair.continuation
+        var completionIterator = completions.stream.makeAsyncIterator()
+        let producer = SpeechPCMProducer(format: playbackFormat, side: selectedSide, live: captureRequired,
+                                         continuation: pair.continuation)
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = voice
-        utterance.rate = min(max(rate, 0.35), 0.6)
-        synthesizer.write(utterance) { buffer in
-            guard let pcm = buffer as? AVAudioPCMBuffer else {
-                pair.continuation.finish(throwing: PipelineError.message("系统语音返回了不支持的音频格式。"))
-                return
-            }
-            guard pcm.frameLength > 0 else { pair.continuation.finish(); return }
-            guard let copied = PCMUtilities.copy(pcm) else {
-                pair.continuation.finish(throwing: PipelineError.message("语音合成缓冲区分配失败。"))
-                return
-            }
-            if case .dropped = pair.continuation.yield(copied) {
-                pair.continuation.finish(throwing: PipelineError.message("语音合成积压，已停止播放。"))
-            }
-        }
-        let converter = PCMConverter(to: playbackFormat)
-        var emitted = false
+        utterance.rate = min(max(rate, 0.35), 0.65)
+        synthesizer.write(utterance, toBufferCallback: producer.receive)
+        var inFlight = 0
+        var started = false
+        var scheduledFinalBuffer = false
         do {
-            for try await pcm in pair.stream {
+            for try await packet in pair.stream {
                 try Task.checkCancellation()
                 guard playbackGeneration == token else { throw CancellationError() }
                 try validateRoute()
-                guard let converted = try converter.convert(pcm) else { continue }
-                try PCMUtilities.isolate(converted, side: selectedSide)
-                emitted = true
-                schedule(converted, completion: completions.continuation)
-                scheduledCount += 1
-                if scheduledCount >= 4 {
+                player.scheduleBuffer(packet.buffer, completionCallbackType: packet.completionType) { _ in
+                    completions.continuation.yield(())
+                }
+                if packet.isFinal { scheduledFinalBuffer = true }
+                hasScheduledSpeech = true
+                if !player.isPlaying { player.play() }
+                if !started {
+                    started = true
+                    onFirstBufferScheduled?()
+                }
+                inFlight += 1
+                if inFlight == 4 {
                     guard try await completionIterator.next() != nil else { throw CancellationError() }
-                    scheduledCount -= 1
+                    inFlight -= 1
                 }
             }
-            for tail in try converter.finish() {
-                try Task.checkCancellation()
-                guard playbackGeneration == token else { throw CancellationError() }
-                try validateRoute()
-                try PCMUtilities.isolate(tail, side: selectedSide)
-                emitted = true
-                schedule(tail, completion: completions.continuation)
-                scheduledCount += 1
-                if scheduledCount >= 4 {
-                    guard try await completionIterator.next() != nil else { throw CancellationError() }
-                    scheduledCount -= 1
-                }
-            }
-            while scheduledCount > 0 {
+            while inFlight > 0 {
                 try Task.checkCancellation()
                 guard playbackGeneration == token,
                       try await completionIterator.next() != nil else { throw CancellationError() }
-                scheduledCount -= 1
+                inFlight -= 1
             }
-            guard emitted else { throw PipelineError.message("系统语音没有生成可播放的声音。") }
+            try Task.checkCancellation()
+            guard playbackGeneration == token else { throw CancellationError() }
+            guard scheduledFinalBuffer else { throw PipelineError.message("语音播放未完成。") }
         } catch {
             if playbackGeneration == token { stopSpeech() }
             throw error
         }
         if playbackGeneration == token {
+            hasScheduledSpeech = false
             synthesisContinuation = nil
             playbackCompletionContinuation?.finish()
             playbackCompletionContinuation = nil
@@ -234,13 +335,60 @@ final class AudioController {
     }
 
     func stopSpeech() {
+        hasScheduledSpeech = false
         playbackGeneration = UUID()
         synthesisContinuation?.finish(throwing: CancellationError())
         synthesisContinuation = nil
         synthesizer.stopSpeaking(at: .immediate)
         playbackCompletionContinuation?.finish(throwing: CancellationError())
         playbackCompletionContinuation = nil
-        player.stop()
+        if player.engine != nil { player.stop() }
+    }
+
+    func finishTurnCapture() {
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        capturedAudio?.finishInput()
+        capturedAudio = nil
+        stop()
+    }
+
+    /// Public playback is a distinct, explicit operation after capture has stopped.
+    func configurePartnerSpeaker(onFailure: @escaping @MainActor (String) -> Void) async throws {
+        try Task.checkCancellation()
+        stop()
+        selectedSide = .both
+        try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+        try session.setActive(true)
+        ownsActiveSession = true
+        partnerSpeaker = true
+        try session.overrideOutputAudioPort(.speaker)
+        for _ in 0..<20 {
+            try Task.checkCancellation()
+            if session.currentRoute.outputs.count == 1, session.currentRoute.outputs.first?.portType == .builtInSpeaker { break }
+            try await Task.sleep(for: .milliseconds(75))
+        }
+        try Task.checkCancellation()
+        expectedOutputUID = session.currentRoute.outputs.first?.uid
+        try validateRoute()
+        snapshot = inspectRoute()
+        try configureOutputGraph()
+        engine.prepare()
+        try engine.start()
+        try validateRoute()
+        observeRoute(onFailure: onFailure)
+    }
+
+    /// A conversational handoff requires the last speaker buffer to finish and
+    /// the public override to be cleared. The listener then negotiates its own
+    /// private route before enabling the microphone.
+    func releasePartnerSpeaker() throws {
+        guard partnerSpeaker, engine.isRunning else { throw PipelineError.message("手机外放已中断，请点听对方重新收听。") }
+        try validateRoute()
+        try session.overrideOutputAudioPort(.none)
+        partnerSpeaker = false
     }
 
     func stop() {
@@ -253,21 +401,37 @@ final class AudioController {
             tapInstalled = false
         }
         engine.stop()
-        captureContinuation?.finish()
-        captureContinuation = nil
+        capturedAudio?.discard()
+        capturedAudio = nil
         playbackFormat = nil
+        expectedHardwareOutput = nil
         expectedInputUID = nil
         expectedOutputUID = nil
+        captureRequired = false
+        phoneInputOnly = false
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
-        try? session.setActive(false, options: .notifyOthersOnDeactivation)
+        if partnerSpeaker {
+            try? session.overrideOutputAudioPort(.none)
+            partnerSpeaker = false
+        }
+        if ownsActiveSession {
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            ownsActiveSession = false
+        }
     }
 
-    private func schedule(_ buffer: AVAudioPCMBuffer, completion: AsyncThrowingStream<Void, Error>.Continuation) {
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
-            completion.yield(())
+    private func configureOutputGraph() throws {
+        let hardware = engine.outputNode.outputFormat(forBus: 0)
+        guard hardware.sampleRate > 0, hardware.channelCount > 0,
+              let format = AVAudioFormat(standardFormatWithSampleRate: hardware.sampleRate,
+                                        channels: snapshot.output.supportsSingleEar ? 2 : 1) else {
+            throw PipelineError.message("当前耳机播放格式不可用。")
         }
-        if !player.isPlaying { player.play() }
+        expectedHardwareOutput = hardware
+        playbackFormat = format
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
     }
 
     private func inspectRoute() -> AudioSnapshot {
@@ -275,7 +439,6 @@ final class AudioController {
         let input = route.inputs.first
         let output = route.outputs.first
         let channels = output?.channels ?? []
-        let headphones: Set<AVAudioSession.Port> = [.bluetoothHFP, .bluetoothA2DP, .bluetoothLE, .headphones]
         let hardwareCount = Int(engine.outputNode.outputFormat(forBus: 0).channelCount)
         let stereoLabels = channels.count == 2 && channels[0].channelLabel == kAudioChannelLabel_Left
             && channels[1].channelLabel == kAudioChannelLabel_Right
@@ -286,7 +449,7 @@ final class AudioController {
         result.output = OutputCapability(channelCount: min(channels.count, hardwareCount),
                                          hasLeftRightLabels: stereoLabels,
                                          systemMono: UIAccessibility.isMonoAudioEnabled,
-                                         isHeadphones: route.outputs.count == 1 && output.map { headphones.contains($0.portType) } == true)
+                                         isHeadphones: route.outputs.count == 1 && output.map(Self.isHeadphone) == true)
         if #available(iOS 26.2, *), let capability = input?.bluetoothMicrophoneExtension?.farFieldCapture {
             result.farFieldSupported = capability.isSupported
             result.farFieldEnabled = capability.isEnabled
@@ -295,16 +458,74 @@ final class AudioController {
         return result
     }
 
+    private static func identity(_ port: AVAudioSessionPortDescription) -> RoutePortIdentity {
+        RoutePortIdentity(uid: port.uid, name: port.portName)
+    }
+
+    private static func isBluetooth(_ port: AVAudioSessionPortDescription) -> Bool {
+        [.bluetoothHFP, .bluetoothA2DP, .bluetoothLE].contains(port.portType)
+    }
+
+    private static func isHeadphone(_ port: AVAudioSessionPortDescription) -> Bool {
+        isBluetooth(port) || port.portType == .headphones
+    }
+
+    private static func accepts(_ port: AVAudioSessionPortDescription, source: CaptureSource) -> Bool {
+        source == .phone ? port.portType == .builtInMic : [.bluetoothHFP, .bluetoothLE].contains(port.portType)
+    }
+
+    private static func farFieldEnabled(_ port: AVAudioSessionPortDescription?) -> Bool {
+        if #available(iOS 26.2, *) { return port?.bluetoothMicrophoneExtension?.farFieldCapture.isEnabled == true }
+        return false
+    }
+
+    private func requestStereoIfSupported() {
+        if session.maximumOutputNumberOfChannels >= 2 && session.outputNumberOfChannels != 2 {
+            try? session.setPreferredOutputNumberOfChannels(2)
+        }
+    }
+
+    private func routeSummary() -> String {
+        let route = session.currentRoute
+        func names(_ ports: [AVAudioSessionPortDescription]) -> String {
+            ports.isEmpty ? "无" : ports.map { "\($0.portName)（\($0.portType.rawValue)）" }.joined(separator: "、")
+        }
+        return "实际输入：\(names(route.inputs))，输出：\(names(route.outputs))。"
+    }
+
     private func validateRoute() throws {
         let route = session.currentRoute
-        guard route.inputs.first?.uid == expectedInputUID, route.outputs.first?.uid == expectedOutputUID,
-              inspectRoute().output.permits(selectedSide) else {
-            throw PipelineError.message("音频路由已变化，已停止播报。请重新检查耳机。")
-        }
-        if selectedSource == .headset {
-            guard inspectRoute().farFieldEnabled else {
-                throw PipelineError.message("远场收音已失效，已停止。")
+        if phoneInputOnly {
+            guard captureRequired, session.category == .record, route.inputs.count == 1,
+                  let mic = route.inputs.first, mic.portType == .builtInMic, mic.uid == expectedInputUID else {
+                throw PipelineError.message("iPhone 内置麦克风已切换，请重新开始手机对话。" + routeSummary())
             }
+            return
+        }
+        if partnerSpeaker {
+            guard !captureRequired, session.category == .playAndRecord, route.outputs.count == 1,
+                  let port = route.outputs.first, port.portType == .builtInSpeaker, port.uid == expectedOutputUID else {
+                throw PipelineError.message("手机扬声器不可用。可以把屏幕上的译文给对方看。")
+            }
+            return
+        }
+        if captureRequired {
+            guard session.category == .playAndRecord, route.inputs.count == 1, let input = route.inputs.first,
+                  input.uid == expectedInputUID, Self.accepts(input, source: selectedSource) else {
+                throw PipelineError.message("当前麦克风或录音模式与启动时不一致。" + routeSummary())
+            }
+        } else if session.category != .playback {
+            throw PipelineError.message("系统已切换音频播放模式。" + routeSummary())
+        }
+        guard let output = route.outputs.first, route.outputs.count == 1,
+              output.uid == expectedOutputUID, Self.isHeadphone(output) else {
+            throw PipelineError.message("耳机已断开或输出设备已切换。" + routeSummary())
+        }
+        if selectedSide != .both && !inspectRoute().output.permits(selectedSide) {
+            throw PipelineError.message("当前耳机声道无法单独向所选耳侧播放。请检查声道或选择双耳。")
+        }
+        if captureRequired && requiresFarField && !Self.farFieldEnabled(route.inputs.first) {
+            throw PipelineError.message("系统已停用耳机远场收音。" + routeSummary())
         }
     }
 
@@ -312,16 +533,48 @@ final class AudioController {
         let token = routeGeneration
         let center = NotificationCenter.default
         let names: [Notification.Name] = [AVAudioSession.routeChangeNotification,
-                                          AVAudioSession.interruptionNotification,
-                                          AVAudioSession.mediaServicesWereResetNotification,
-                                          .AVAudioEngineConfigurationChange,
-                                          UIAccessibility.monoAudioStatusDidChangeNotification]
+                                         AVAudioSession.interruptionNotification,
+                                         AVAudioSession.mediaServicesWereLostNotification,
+                                         AVAudioSession.mediaServicesWereResetNotification,
+                                         .AVAudioEngineConfigurationChange,
+                                         UIAccessibility.monoAudioStatusDidChangeNotification]
         for name in names {
-            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            let object: AnyObject? = name == .AVAudioEngineConfigurationChange ? engine :
+                (name == UIAccessibility.monoAudioStatusDidChangeNotification ? nil : session)
+            observers.append(center.addObserver(forName: name, object: object, queue: .main) { [weak self] notification in
+                let signal: AudioSessionSignal
+                switch name {
+                case AVAudioSession.interruptionNotification:
+                    let value = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? NSNumber)?.uintValue
+                    signal = value == AVAudioSession.InterruptionType.ended.rawValue ? .interruptionEnded : .interruptionBegan
+                case AVAudioSession.mediaServicesWereResetNotification, AVAudioSession.mediaServicesWereLostNotification:
+                    signal = .servicesLost
+                case .AVAudioEngineConfigurationChange: signal = .engineChanged
+                case UIAccessibility.monoAudioStatusDidChangeNotification: signal = .monoChanged
+                default: signal = .routeChanged
+                }
+                // Leave the notification callback before tearing down the engine.
                 Task { @MainActor in
-                    guard let self, self.routeGeneration == token, self.expectedOutputUID != nil else { return }
-                    self.stopSpeech()
-                    onFailure("音频设备、系统声道或音频会话发生变化，已暂停。请检查耳机后手动恢复。")
+                    guard let self, self.routeGeneration == token else { return }
+                    var reason = signal.immediateStop
+                    if reason == nil {
+                        var invalid: String?
+                        do { try self.validateRoute() } catch { invalid = error.localizedDescription }
+                        let running = self.engine.isRunning
+                        let formatsOK = running && (self.phoneInputOnly || self.expectedHardwareOutput == self.engine.outputNode.outputFormat(forBus: 0))
+                            && (!self.captureRequired || self.capturedAudio?.format == self.inputFormat)
+                        reason = signal.pauseReason(routeFailure: invalid, engineRunning: running, formatMatches: formatsOK)
+                        if reason == nil, signal == .engineChanged, self.hasScheduledSpeech, !self.player.isPlaying {
+                            reason = "系统重新配置音频引擎时中止了当前播报。"
+                        }
+                    }
+                    if let reason {
+                        self.snapshot.inputName = self.session.currentRoute.inputs.first?.portName ?? "无输入"
+                        self.snapshot.outputName = self.session.currentRoute.outputs.first?.portName ?? "无输出"
+                        self.snapshot.detail = reason
+                        self.stopSpeech()
+                        onFailure(reason + " 已暂停，请手动恢复。")
+                    }
                 }
             })
         }

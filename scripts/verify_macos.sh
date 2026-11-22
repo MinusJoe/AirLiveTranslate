@@ -47,6 +47,10 @@ xcodebuild test \
   -derivedDataPath build/DerivedData \
   -resultBundlePath "$RESULT_PATH" \
   CODE_SIGNING_ALLOWED=NO 2>&1 | tee build/ios-tests.log
+# Optional visual evidence has a bounded deadline; build/test failures above
+# remain mandatory. Reuse a booted test simulator instead of starting a second.
+python3 scripts/capture_simulator.py "$SIMULATOR_ID" \
+  build/DerivedData/Build/Products/Debug-iphonesimulator/AirPodsTranslator.app
 # Also compile the release/device architecture before a signing workflow.
 xcodebuild build \
   -project AirPodsTranslator.xcodeproj \

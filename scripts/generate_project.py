@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a dependency-free, deterministic Xcode project. Run from any directory."""
+"""Generate the deterministic Xcode project. Run from any directory."""
 from __future__ import annotations
 
 import argparse
@@ -73,7 +73,11 @@ def generate(bundle_id: str, team: str, build_number: str):
     def phase(name, isa, files):
         return add(name, isa, buildActionMask=2147483647, files=files, runOnlyForDeploymentPostprocessing=0)
 
-    app_phases = [phase("app-sources", "PBXSourcesBuildPhase", source_builds), phase("app-frameworks", "PBXFrameworksBuildPhase", []), phase("app-resources", "PBXResourcesBuildPhase", resource_builds)]
+    audio_package = add("fluid-package", "XCRemoteSwiftPackageReference", repositoryURL="https://github.com/FluidInference/FluidAudio.git",
+                        requirement={"kind": "exactVersion", "version": "0.18.4"})
+    audio_product = add("fluid-product", "XCSwiftPackageProductDependency", package=audio_package, productName="FluidAudio")
+    audio_link = add("fluid-framework", "PBXBuildFile", productRef=audio_product)
+    app_phases = [phase("app-sources", "PBXSourcesBuildPhase", source_builds), phase("app-frameworks", "PBXFrameworksBuildPhase", [audio_link]), phase("app-resources", "PBXResourcesBuildPhase", resource_builds)]
     test_phases = [phase("test-sources", "PBXSourcesBuildPhase", test_builds), phase("test-frameworks", "PBXFrameworksBuildPhase", [])]
     proxy = add("proxy", "PBXContainerItemProxy", containerPortal=project_id, proxyType=1, remoteGlobalIDString=app_id, remoteInfo=APP)
     dependency = add("test-dependency", "PBXTargetDependency", target=app_id, targetProxy=proxy)
@@ -84,8 +88,11 @@ def generate(bundle_id: str, team: str, build_number: str):
             settings = {}
             if kind == "project":
                 settings = {"IPHONEOS_DEPLOYMENT_TARGET": "26.0", "SDKROOT": "iphoneos", "SWIFT_VERSION": "5.0", "CLANG_ENABLE_MODULES": "YES", "CLANG_ENABLE_OBJC_ARC": "YES", "ENABLE_USER_SCRIPT_SANDBOXING": "YES", "DEBUG_INFORMATION_FORMAT": "dwarf" if name == "Debug" else "dwarf-with-dsym", "SWIFT_OPTIMIZATION_LEVEL": "-Onone" if name == "Debug" else "-O", "SWIFT_ACTIVE_COMPILATION_CONDITIONS": "DEBUG $(inherited)" if name == "Debug" else "$(inherited)", "ENABLE_TESTABILITY": "YES" if name == "Debug" else "NO"}
+                if name == "Debug":
+                    # Match SwiftPM's architecture for the selected simulator.
+                    settings["ONLY_ACTIVE_ARCH[sdk=iphonesimulator*]"] = "YES"
             else:
-                settings = {"PRODUCT_NAME": "$(TARGET_NAME)", "CODE_SIGN_STYLE": "Automatic", "TARGETED_DEVICE_FAMILY": "1", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator", "SUPPORTS_MACCATALYST": "NO", "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD": "NO", "CURRENT_PROJECT_VERSION": build_number, "MARKETING_VERSION": "0.1.0", "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/Frameworks"]}
+                settings = {"PRODUCT_NAME": "$(TARGET_NAME)", "CODE_SIGN_STYLE": "Automatic", "TARGETED_DEVICE_FAMILY": "1", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator", "SUPPORTS_MACCATALYST": "NO", "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD": "NO", "CURRENT_PROJECT_VERSION": build_number, "MARKETING_VERSION": "0.1.12", "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/Frameworks"]}
                 if team:
                     settings["DEVELOPMENT_TEAM"] = team
                 if kind == "app":
@@ -100,10 +107,11 @@ def generate(bundle_id: str, team: str, build_number: str):
     project_configs = configurations("project")
     app_configs = configurations("app")
     test_configs = configurations("test")
-    add("app", "PBXNativeTarget", buildConfigurationList=app_configs, buildPhases=app_phases, buildRules=[], dependencies=[], name=APP, productName=APP, productReference=app_product, productType="com.apple.product-type.application")
+    add("app", "PBXNativeTarget", buildConfigurationList=app_configs, buildPhases=app_phases, buildRules=[], dependencies=[], packageProductDependencies=[audio_product], name=APP, productName=APP, productReference=app_product, productType="com.apple.product-type.application")
     add("test", "PBXNativeTarget", buildConfigurationList=test_configs, buildPhases=test_phases, buildRules=[], dependencies=[dependency], name=APP + "Tests", productName=APP + "Tests", productReference=test_product, productType="com.apple.product-type.bundle.unit-test")
     add("project", "PBXProject", attributes={"BuildIndependentTargetsInParallel": "YES", "LastUpgradeCheck": "2620", "TargetAttributes": {app_id: {"CreatedOnToolsVersion": "26.2"}, test_id: {"CreatedOnToolsVersion": "26.2", "TestTargetID": app_id}}}, buildConfigurationList=project_configs, compatibilityVersion="Xcode 14.0", developmentRegion="zh-Hans", hasScannedForEncodings=0, knownRegions=["zh-Hans", "en", "Base"], mainGroup=main_group, productRefGroup=product_group, projectDirPath="", projectRoot="", targets=[app_id, test_id])
     content = {"archiveVersion": 1, "classes": {}, "objectVersion": 56, "objects": objects, "rootObject": project_id}
+    objects[project_id]["packageReferences"] = [audio_package]
     PROJECT.mkdir(parents=True, exist_ok=True)
     (PROJECT / "project.pbxproj").write_text("// !$*UTF8*$!\n" + serialize(content) + "\n", encoding="utf-8")
 
