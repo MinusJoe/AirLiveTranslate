@@ -1,28 +1,23 @@
 import SwiftUI
 import Translation
-import UIKit
 
 struct ConversationView: View {
-    @StateObject private var coordinator: DialogueCoordinator
+    @ObservedObject var listener: TranslationViewModel
+    @ObservedObject var coordinator: DialogueCoordinator
+    @ObservedObject private var reply: ConversationReplyModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmStart = false
+    @State private var confirmEnroll = false
+    @State private var additionalSample = false
+    @State private var confirmDelete = false
+    @State private var notes: MeetingMinutes?
+    @State private var summary: MeetingSummaryResult?
 
     init(model: TranslationViewModel) {
-        _coordinator = StateObject(wrappedValue: DialogueCoordinator(listener: model))
+        listener = model
+        coordinator = model.dialogue
+        reply = model.dialogue.reply
     }
-
-    var body: some View {
-        DialogueScreen(coordinator: coordinator, listener: coordinator.listener, reply: coordinator.reply)
-    }
-}
-
-private struct DialogueScreen: View {
-    @ObservedObject var coordinator: DialogueCoordinator
-    @ObservedObject var listener: TranslationViewModel
-    @ObservedObject var reply: ConversationReplyModel
-    @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var activePress: UUID?
-    @State private var closed = false
-    private var holding: Bool { activePress != nil }
 
     var body: some View {
         NavigationStack {
@@ -30,62 +25,74 @@ private struct DialogueScreen: View {
                 if let editor = coordinator.editor {
                     DialogueEntryEditor(editor: editor, busy: reply.phase != .idle, message: reply.message,
                                         submit: { coordinator.submitEditor(editor.id, text: $0) },
-                                        cancel: { coordinator.cancelEditor(editor.id) })
-                        .id(editor.id)
+                                        cancel: { coordinator.cancelEditor(editor.id) }).id(editor.id)
                 } else {
-                    conversation
+                    VStack(spacing: 4) {
+                        HStack {
+                            Picker("对方的语言", selection: Binding(get: { coordinator.language }, set: coordinator.selectLanguage)) {
+                                ForEach(AppLanguage.allCases.filter { $0 != .chinese }) { Text($0.name).tag($0) }
+                            }.disabled(!coordinator.canConfigureDialogue)
+                            Spacer()
+                            Menu {
+                                Button(coordinator.enrolled ? "重新登记我的声音" : "登记我的声音") { additionalSample = false; confirmEnroll = true }
+                                    .disabled(!coordinator.canConfigureDialogue)
+                                if coordinator.enrolled {
+                                    Button("补录另一种语言") { additionalSample = true; confirmEnroll = true }
+                                        .disabled(!coordinator.canConfigureDialogue)
+                                    Button("删除我的声纹", role: .destructive) { confirmDelete = true }
+                                        .disabled(coordinator.phase != .idle)
+                                }
+                            } label: {
+                                Label(coordinator.enrolled ? "已登记声纹" : "我的声纹", systemImage: "waveform.badge.person.crop")
+                                    .font(.subheadline)
+                            }
+                        }.padding(.horizontal, 20)
+                        if coordinator.realtimeBusy {
+                            liveTranscript
+                        } else {
+                            Picker("对话设备", selection: Binding(get: { coordinator.device }, set: coordinator.selectDevice)) {
+                                ForEach(DialogueDevice.allCases, id: \.self) { device in
+                                    Text(device.rawValue).tag(device)
+                                }
+                            }
+                            .pickerStyle(.segmented).padding(.horizontal, 20)
+                            .disabled(!coordinator.canConfigureDialogue)
+                            transcript
+                        }
+                    }
+                    .safeAreaInset(edge: .bottom, spacing: 0) { controls }
                 }
             }
-            .navigationTitle(coordinator.editor == nil ? "面对面对话" : "")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar(coordinator.editor == nil ? .visible : .hidden, for: .navigationBar)
+            .navigationTitle("面对面对话").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if coordinator.editor == nil {
-                    ToolbarItem(placement: .confirmationAction) { Button("完成") { close(); dismiss() } }
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { notes = coordinator.minutes } label: { Image(systemName: "doc.text") }
+                            .accessibilityLabel("对话记录与导出")
+                    }
+                    ToolbarItem(placement: .confirmationAction) { Button("返回") { dismiss() } }
                 }
             }
             .audioPage()
         }
-        .onAppear { if !closed { coordinator.open() } }
+        .onAppear { coordinator.open() }
+        .sheet(item: $notes) { snapshot in
+            MeetingMinutesView(minutes: snapshot, listening: listener.dialogueOwnsAudio || coordinator.realtimeBusy, savedSummary: $summary)
+        }
         .interactiveDismissDisabled(coordinator.editor != nil)
-        .onDisappear { close() }
-        .onChange(of: scenePhase) { _, phase in
-            if phase == .background && (holding || reply.phase != .idle) { pause() }
+        .confirmationDialog("开始连续听译？", isPresented: $confirmStart, titleVisibility: .visible) {
+            Button("已告知在场人员，开始") { coordinator.start() }
+        } message: {
+            Text("请先告知所有参与者。首次需联网下载本机语音和声纹模型。返回其他页面后仍会收音，直到点「结束对话」。新对话会替换上次对话记录。")
         }
-        .onChange(of: reply.phase) { _, phase in
-            if phase == .idle { activePress = nil }
-            if phase == .recording, holding, UIAccessibility.isVoiceOverRunning {
-                UIAccessibility.post(notification: .announcement, argument: "可以说中文了。说完后激活结束发言按钮。")
-            }
+        .confirmationDialog("登记我的声音", isPresented: $confirmEnroll, titleVisibility: .visible) {
+            Button("开始采样") { coordinator.start(enrollment: true, additional: additionalSample) }
+        } message: {
+            Text(additionalSample ? "请用另一种语言独自说约五秒。最多保存三段声音特征，样本只存在本机。"
+                 : "接下来请独自说约五秒。首次需要下载模型；只在本机钥匙串保存声音特征。重新登记会在成功后替换旧样本。")
         }
-    }
-
-    private var conversation: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
-                Text("对方的语言").font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
-                Spacer(minLength: 0)
-                ForEach(AppLanguage.allCases.filter { $0 != .chinese }) { language in
-                    let selected = coordinator.language == language
-                    Button { coordinator.selectLanguage(language) } label: {
-                        Text(language.name).font(.subheadline.weight(selected ? .semibold : .regular))
-                            .foregroundStyle(selected ? AudioTheme.accent : AudioTheme.secondary)
-                            .padding(.horizontal, 13).padding(.vertical, 7)
-                            .background(selected ? AudioTheme.blueWash : Color.clear, in: Capsule())
-                            .frame(minHeight: 44).contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                }
-            }
-            .disabled(!coordinator.canChangeLanguage)
-            .padding(.horizontal, 20)
-            transcript.translationTask(listener.translationConfiguration) { session in
-                await listener.prepareResources(using: session)
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            controls.translationTask(reply.configuration) { session in await reply.prepare(using: session) }
+        .confirmationDialog("删除本机保存的我的声纹？", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("删除声纹", role: .destructive) { coordinator.removeVoiceprint() }
         }
     }
 
@@ -93,234 +100,129 @@ private struct DialogueScreen: View {
         let latestPartner = coordinator.entries.last(where: { $0.speaker == .partner })?.id
         return ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 15) {
-                    if coordinator.entries.isEmpty && listener.draft.isEmpty && !showReplyDraft {
-                        VStack(spacing: 10) {
-                            Image(systemName: "bubble.left.and.bubble.right.fill")
-                                .font(.largeTitle).symbolRenderingMode(.hierarchical).foregroundStyle(AudioTheme.accent)
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    if coordinator.entries.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "person.3.fill").font(.largeTitle).foregroundStyle(AudioTheme.accent)
                             Text("中文 ⇄ \(coordinator.language.name)").font(AudioTheme.headline)
-                            Text("对方说话时听耳机，轮到你时按住下方按钮。")
+                            Text(coordinator.device == .phone
+                                 ? "把手机放在你们之间。双方译文显示在这里，点喇叭就能用手机播放。"
+                                 : "你说的话点喇叭才会外放，对方的中文译音自动送到耳机。")
                                 .font(.subheadline).foregroundStyle(AudioTheme.secondary)
-                        }.multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.vertical, 48)
+                        }.multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.vertical, 34)
                     }
                     ForEach(coordinator.entries) { entry in
-                        bubble(mine: entry.speaker == .me, original: entry.original, translated: entry.translated,
-                               provisional: entry.isProvisional, entry: entry)
-                        if entry.id == latestPartner, let amount = coordinator.amountQuestion {
-                            questionButton(amount).disabled(!coordinator.canBeginReply || holding)
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack {
+                                Text(entry.participantLabel ?? (entry.speaker == .me ? "我" : "对方"))
+                                if entry.kind == .typed { Text("手动填写") }
+                                if case .correction = entry.kind { Text("更正回复") }
+                                if entry.supersededBy != nil { Text("已更正") }
+                                if entry.correctionLanguage != nil {
+                                    Button("更正") { coordinator.beginCorrection(of: entry.id) }
+                                        .disabled(!coordinator.canAct)
+                                }
+                            }.font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(entry.translated.isEmpty ? entry.original : entry.translated)
+                                    .font(.title3.weight(.semibold)).textSelection(.enabled)
+                                if let destination = entry.playback(in: coordinator.device) {
+                                    playbackButton(entry, destination: destination)
+                                }
+                            }
+                            if !entry.translated.isEmpty && entry.translated != entry.original {
+                                Text(entry.original).font(.subheadline).foregroundStyle(AudioTheme.secondary).textSelection(.enabled)
+                            }
+                        }
+                        .padding(14)
+                        .background(entry.speaker == .me ? AudioTheme.blueWash : AudioTheme.surface,
+                                    in: RoundedRectangle(cornerRadius: 15))
+                        .frame(maxWidth: .infinity, alignment: entry.speaker == .me ? .trailing : .leading)
+                        if entry.id == latestPartner, let question = coordinator.amountQuestion {
+                            Button(question.label) { coordinator.ask(question) }.disabled(!coordinator.canAct)
                         }
                     }
-                    if !listener.draft.isEmpty && listener.microphoneActive {
-                        bubble(mine: false, original: listener.draft, translated: "", provisional: true)
-                    }
-                    if showReplyDraft {
-                        bubble(mine: true, original: reply.original, translated: reply.translated, provisional: reply.phase == .recording)
-                    }
-                    Color.clear.frame(height: 1).id("dialogue-bottom")
-                }
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
+                    Color.clear.frame(height: 1).id("group-bottom")
+                }.padding(.horizontal, 20).padding(.vertical, 10)
             }
-            .onAppear { if !coordinator.entries.isEmpty { proxy.scrollTo("dialogue-bottom", anchor: .bottom) } }
-            .onChange(of: coordinator.entries.last?.id) { _, _ in proxy.scrollTo("dialogue-bottom", anchor: .bottom) }
-            .onChange(of: coordinator.entries.last?.translated) { _, _ in proxy.scrollTo("dialogue-bottom", anchor: .bottom) }
-            .onChange(of: listener.draft) { _, _ in proxy.scrollTo("dialogue-bottom", anchor: .bottom) }
-            .onChange(of: reply.original) { _, _ in proxy.scrollTo("dialogue-bottom", anchor: .bottom) }
+            .onChange(of: coordinator.entries.last?.id) { _, _ in proxy.scrollTo("group-bottom", anchor: .bottom) }
+            .onAppear { proxy.scrollTo("group-bottom", anchor: .bottom) }
         }
     }
 
-    private var showReplyDraft: Bool {
-        guard reply.language == coordinator.language, !reply.original.isEmpty else { return false }
-        if reply.phase != .idle { return true }
-        return !coordinator.isListeningRequested && !reply.translated.isEmpty && !reply.message.isEmpty
+    private func playbackButton(_ entry: DialogueEntry, destination: DialoguePlayback) -> some View {
+        let label: String
+        let icon: String
+        switch destination {
+        case .phoneSpeaker(let language):
+            label = "用手机扬声器播放\(language.name)译文"
+            icon = "speaker.wave.2.fill"
+        case .earpiece(let language):
+            label = "用耳机播放\(language.name)译文"
+            icon = "headphones"
+        }
+        return Button { coordinator.play(entry) } label: {
+            Label(label, systemImage: icon).labelStyle(.iconOnly)
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).foregroundStyle(AudioTheme.accent)
+        .accessibilityLabel(label)
+        .disabled(!coordinator.canAct)
     }
 
-    private func bubble(mine: Bool, original: String, translated: String, provisional: Bool,
-                        entry: DialogueEntry? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: mine ? "mic.fill" : "headphones")
-                    .foregroundStyle(mine ? AudioTheme.accent : AudioTheme.secondary)
-                Text((mine ? "我" : "对方") + (provisional ? " · 识别中" : ""))
-                if entry?.kind == .typed { Text("手动填写") }
-                if let entry, case .correction = entry.kind { Text("更正回复") }
-                if entry?.supersededBy != nil { Text("已更正") }
-                if let entry, entry.correctionLanguage != nil {
-                    Button("更正") { coordinator.beginCorrection(of: entry.id) }
-                        .disabled(!coordinator.canBeginReply || holding)
-                        .accessibilityHint("编辑这句中文，在手机上播出更正后的译文。")
-                }
-            }.font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
-            Text(translated.isEmpty ? original : translated)
-                .font(.title3.weight(.semibold)).lineSpacing(4)
-                .foregroundStyle(AudioTheme.text)
-            if !translated.isEmpty { Text(original).font(.subheadline).foregroundStyle(AudioTheme.secondary) }
+    /// The primary listener remains the only audio owner; this is a read-only mirror.
+    private var liveTranscript: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    Text("实时听译 · \(listener.source.name) → \(listener.target.name)")
+                        .font(.headline)
+                    ForEach(listener.captions.filter { $0.status != .superseded }) { row in
+                        VStack(alignment: .leading, spacing: 4) {
+                            if !row.translated.isEmpty { Text(row.translated).font(.title3) }
+                            Text(row.original).foregroundStyle(AudioTheme.secondary)
+                        }.textSelection(.enabled)
+                    }
+                    if !listener.draft.isEmpty { Text(listener.draft).foregroundStyle(AudioTheme.secondary) }
+                    Color.clear.frame(height: 1).id("live-bottom")
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(20)
+            }
+            .onAppear { proxy.scrollTo("live-bottom", anchor: .bottom) }
+            .onChange(of: listener.captions.last?.translated) { _, _ in proxy.scrollTo("live-bottom", anchor: .bottom) }
+            .onChange(of: listener.draft) { _, _ in proxy.scrollTo("live-bottom", anchor: .bottom) }
         }
-        .padding(.horizontal, 16).padding(.vertical, 13)
-        .background(mine ? AudioTheme.blueWash : AudioTheme.surface,
-                    in: UnevenRoundedRectangle(topLeadingRadius: mine ? 18 : 5, bottomLeadingRadius: 18,
-                                               bottomTrailingRadius: 18, topTrailingRadius: mine ? 5 : 18))
-        .frame(maxWidth: .infinity, alignment: mine ? .trailing : .leading)
-        .padding(mine ? .leading : .trailing, 28)
-        .textSelection(.enabled)
     }
 
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ScrollView(.horizontal) {
-                HStack(spacing: 7) {
-                    ForEach(DialogueQuestion.allCases) { question in questionButton(question) }
-                }
-            }
-            .scrollIndicators(.hidden)
-            .disabled(!coordinator.canBeginReply || holding)
-            if coordinator.canShowTypingFallback {
-                Button("直接递给对方填写") { coordinator.showTypingFallback() }
+        VStack(alignment: .leading, spacing: 9) {
+            if coordinator.realtimeBusy {
+                Text("实时听译正在使用音频。可以浏览此页，开始面对面对话前请先停止实时听译。")
                     .font(.subheadline)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text(statusMessage).font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Button(sessionIsActive ? "暂停对话" : "开始听对方") {
-                    if sessionIsActive { pause() } else { coordinator.startListening() }
+                Button("停止实时听译") { listener.stop(reason: "实时听译已手动停止。") }
+            } else {
+                if coordinator.phase == .capturing || !coordinator.entries.isEmpty {
+                    ScrollView(.horizontal) {
+                        HStack { ForEach(DialogueQuestion.allCases) { q in Button(q.label) { coordinator.ask(q) }.buttonStyle(.bordered) } }
+                    }.disabled(!coordinator.canAct).scrollIndicators(.hidden)
                 }
-                .font(.subheadline.weight(.medium))
-            }
-            holdToTalk
-            Text("松手后手机外放，播完自动继续听对方。")
-                .font(.caption).foregroundStyle(AudioTheme.secondary)
-                .frame(maxWidth: .infinity)
-        }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 8)
-        .background(AudioTheme.canvas)
-    }
-
-    private func questionButton(_ question: DialogueQuestion) -> some View {
-        Button { coordinator.ask(question) } label: {
-            Text(question.label).font(.subheadline.weight(.medium)).fixedSize()
-                .padding(.horizontal, 12).padding(.vertical, 7)
-                .overlay { Capsule().strokeBorder(AudioTheme.separator, lineWidth: 1) }
-                .frame(minHeight: 44)
-        }
-        .buttonStyle(.plain).foregroundStyle(AudioTheme.accent)
-        .accessibilityLabel("追问，\(question.label)")
-        .accessibilityHint(question == .writeNumber ? "用手机播出邀请，随后请对方在屏幕上填写。" : "用手机向对方播出追问，播完继续听。")
-    }
-
-    private var holdToTalk: some View {
-        let enabled = holding || coordinator.canBeginReply
-        return AudioActionLabel(title: holding ? (reply.phase == .recording ? "松开翻译并播放" : "请保持按住") : "按住说中文",
-                        symbol: holding ? "waveform" : "mic.fill")
-            .opacity(enabled ? 1 : 0.45)
-            .overlay {
-                ReplyPressSurface(acceptsPress: !holding && coordinator.canBeginReply, onPress: press,
-                                  onRelease: release, onCancel: cancelTouch)
-                    .accessibilityHidden(true)
-            }
-            .accessibilityRepresentation {
-                Button(holding ? "结束发言并播放译文" : "开始说中文") {
-                    if let token = activePress { release(token) } else { press(UUID()) }
+                if coordinator.canShowTypingFallback { Button("直接递给对方填写") { coordinator.showTypingFallback() } }
+                if !coordinator.message.isEmpty {
+                    Text(coordinator.message).font(.footnote).foregroundStyle(AudioTheme.secondary)
                 }
-                .disabled(!enabled)
-                .accessibilityHint("轻点两下开始，再轻点两下结束。译文从手机播出，播完继续听对方。")
+                if coordinator.phase == .idle && coordinator.entries.isEmpty {
+                    Text("请先告知在场人员。首次需联网下载本机模型；切换页面会继续收音，点「结束对话」停止。")
+                        .font(.caption).foregroundStyle(AudioTheme.secondary)
+                }
+                Button {
+                    if coordinator.phase == .idle {
+                        if coordinator.entries.isEmpty { coordinator.start() } else { confirmStart = true }
+                    } else { coordinator.end() }
+                } label: {
+                    AudioActionLabel(title: coordinator.phase == .idle ? "开始连续对话" :
+                                        (coordinator.phase == .capturing ? "结束对话" : "取消"),
+                                     symbol: coordinator.phase == .idle ? "mic.fill" : "stop.fill")
+                }.buttonStyle(.plain)
             }
-    }
-
-    private var sessionIsActive: Bool {
-        coordinator.isListeningRequested || listener.isBusy || listener.isRunning || reply.phase != .idle || holding
-    }
-
-    private var statusMessage: String {
-        if !reply.message.isEmpty && (reply.phase != .idle || !coordinator.isListeningRequested) { return reply.message }
-        if listener.isBusy || listener.state == .failed { return listener.message }
-        if coordinator.isListeningRequested { return listener.isRunning ? "正在听对方 · 中文送到耳机" : "正在准备听对方…" }
-        return "对话已暂停"
-    }
-
-    private func press(_ token: UUID) {
-        guard !closed, !holding, coordinator.canBeginReply else { return }
-        activePress = token
-        coordinator.press()
-    }
-
-    private func release(_ token: UUID) {
-        guard !closed, activePress == token else { return }
-        activePress = nil
-        coordinator.release()
-    }
-
-    private func cancelTouch(_ token: UUID) {
-        guard !closed, activePress == token else { return }
-        activePress = nil
-        // The system resource download sheet can interrupt the first touch.
-        // Preparation returns to idle and requires a new press to record.
-        if reply.phase != .preparing { coordinator.cancelReply() }
-    }
-
-    private func pause() {
-        activePress = nil
-        coordinator.pause()
-    }
-
-    private func close() {
-        guard !closed else { return }
-        closed = true
-        activePress = nil
-        coordinator.close()
-    }
-}
-
-/// Touch-down starts a turn immediately. Keep this control mounted until the
-/// finger lifts, including while speech resources or the microphone start up.
-private struct ReplyPressSurface: UIViewRepresentable {
-    var acceptsPress: Bool
-    var onPress: (UUID) -> Void
-    var onRelease: (UUID) -> Void
-    var onCancel: (UUID) -> Void
-
-    final class TouchControl: UIControl {
-        var acceptsPress = false
-        var onPress: ((UUID) -> Void)?
-        var onRelease: ((UUID) -> Void)?
-        var onCancel: ((UUID) -> Void)?
-        private var trackingReply: UUID?
-
-        override func beginTracking(_ touch: UITouch, with event: UIEvent?) -> Bool {
-            guard acceptsPress, trackingReply == nil else { return false }
-            let token = UUID()
-            trackingReply = token
-            onPress?(token)
-            return true
-        }
-
-        override func continueTracking(_ touch: UITouch, with event: UIEvent?) -> Bool { trackingReply != nil }
-
-        override func endTracking(_ touch: UITouch?, with event: UIEvent?) {
-            guard let token = trackingReply else { return }
-            trackingReply = nil
-            if let touch, bounds.contains(touch.location(in: self)) { onRelease?(token) }
-            else { onCancel?(token) }
-        }
-
-        override func cancelTracking(with event: UIEvent?) {
-            guard let token = trackingReply else { return }
-            trackingReply = nil
-            onCancel?(token)
-        }
-    }
-
-    func makeUIView(context: Context) -> TouchControl {
-        let control = TouchControl()
-        control.isAccessibilityElement = false
-        control.isMultipleTouchEnabled = false
-        return control
-    }
-
-    func updateUIView(_ control: TouchControl, context: Context) {
-        control.acceptsPress = acceptsPress
-        control.onPress = onPress
-        control.onRelease = onRelease
-        control.onCancel = onCancel
+        }.padding(.horizontal, 20).padding(.vertical, 8).background(AudioTheme.canvas)
     }
 }

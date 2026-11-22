@@ -145,6 +145,16 @@
 			"isa" = "PBXBuildFile";
 			"fileRef" = "9493F601C17924F9AFD4841F";
 		};
+		"776EEB7D829BE1FD8A5362BC" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Sources/App/WearerVoiceprint.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"757EEC1E8DAF027604349562" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "776EEB7D829BE1FD8A5362BC";
+		};
 		"4F84BB61021F39567A4AF376" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "sourcecode.swift";
@@ -215,6 +225,16 @@
 			"isa" = "PBXBuildFile";
 			"fileRef" = "E551A4A248CF68312792CD1B";
 		};
+		"07B165833C49CA726AE1A066" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Sources/Core/GroupSpeech.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"AF7BA02D23DC5452AAE2F02E" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "07B165833C49CA726AE1A066";
+		};
 		"C59771D9B9AAE920B2121069" = {
 			"isa" = "PBXFileReference";
 			"lastKnownFileType" = "sourcecode.swift";
@@ -274,6 +294,16 @@
 		"8A8B6C88C85E6C4BD6751B6B" = {
 			"isa" = "PBXBuildFile";
 			"fileRef" = "7F2DA8E58F5B0EC902465858";
+		};
+		"F0873BB1E621B6C50C3ED779" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Sources/Speech/GroupSpeechAnalyzer.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"0E8AA63CB2C7097DBB98E177" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "F0873BB1E621B6C50C3ED779";
 		};
 		"6C56ADABCAF0C8D0D4E4A9A6" = {
 			"isa" = "PBXFileReference";
@@ -364,6 +394,26 @@
 		"9A07814891C0FD132C012205" = {
 			"isa" = "PBXBuildFile";
 			"fileRef" = "3086FFCAB503AA3F99539873";
+		};
+		"3DA360E6A6CFFE2AB8D4B683" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Tests/DialogueOwnershipTests.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"7292F933DF5551C1AA0C69CE" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "3DA360E6A6CFFE2AB8D4B683";
+		};
+		"9BF9DE7AF514DA46A09B5F1E" = {
+			"isa" = "PBXFileReference";
+			"lastKnownFileType" = "sourcecode.swift";
+			"path" = "Tests/GroupSpeechTests.swift";
+			"sourceTree" = "SOURCE_ROOT";
+		};
+		"227E36ED2D54A4CD783403DF" = {
+			"isa" = "PBXBuildFile";
+			"fileRef" = "9BF9DE7AF514DA46A09B5F1E";
 		};
 		"BC8B4EDBE92E92A205532CE4" = {
 			"isa" = "PBXFileReference";
@@ -521,6 +571,7 @@
 				"5D9A65003AD66D856A128257",
 				"E4549F79C9246F559CA1DA6A",
 				"9493F601C17924F9AFD4841F",
+				"776EEB7D829BE1FD8A5362BC",
 				"4F84BB61021F39567A4AF376",
 				"9B8245D18A0E9BD4ED412E12",
 				"8BAE41B5EFFB264275979BAE",
@@ -528,12 +579,14 @@
 				"C4CB439CD657B1675BB9872A",
 				"3869BA79514178FABF2FEC64",
 				"E551A4A248CF68312792CD1B",
+				"07B165833C49CA726AE1A066",
 				"C59771D9B9AAE920B2121069",
 				"09DAB677FC289796237622E4",
 				"8AE67E1059FDAAD70E8BDB81",
 				"C8C2690D147019ACAAA46A2D",
 				"6E6BD3803C2C64387086F0FC",
 				"7F2DA8E58F5B0EC902465858",
+				"F0873BB1E621B6C50C3ED779",
 				"6C56ADABCAF0C8D0D4E4A9A6",
 			);
 			"name" = "Sources";
@@ -550,6 +603,8 @@
 				"412F6C81DFB43EE48557BA41",
 				"FE657D65015E6495A670E288",
 				"3086FFCAB503AA3F99539873",
+				"3DA360E6A6CFFE2AB8D4B683",
+				"9BF9DE7AF514DA46A09B5F1E",
 				"BC8B4EDBE92E92A205532CE4",
 				"31C7D6598CE18C24E531C65B",
 				"6093307C0EB018EEC8978527",
@@ -583,6 +638,23 @@
 			);
 			"sourceTree" = "<group>";
 		};
+		"83498A33D176B1D99220FA6B" = {
+			"isa" = "XCRemoteSwiftPackageReference";
+			"repositoryURL" = "https://github.com/FluidInference/FluidAudio.git";
+			"requirement" = {
+				"kind" = "exactVersion";
+				"version" = "0.18.4";
+			};
+		};
+		"E79D1E0380FD03A52BF596AA" = {
+			"isa" = "XCSwiftPackageProductDependency";
+			"package" = "83498A33D176B1D99220FA6B";
+			"productName" = "FluidAudio";
+		};
+		"60FB29021DDCFFA5DB380D05" = {
+			"isa" = "PBXBuildFile";
+			"productRef" = "E79D1E0380FD03A52BF596AA";
+		};
 		"AFF87A50730392B6633ACECE" = {
 			"isa" = "PBXSourcesBuildPhase";
 			"buildActionMask" = 2147483647;
@@ -601,6 +673,7 @@
 				"3C7D2395E259E453E93A6B19",
 				"CA8A3FE6F62106BB8717107B",
 				"1F62CF264A11BB514D3FB7D2",
+				"757EEC1E8DAF027604349562",
 				"431301AC372EBC517749CEFB",
 				"B766988D2EEEED196D34C8C8",
 				"8876414D8486CB48739D6C24",
@@ -608,12 +681,14 @@
 				"ADC5402D69EF3F39CABE98E2",
 				"6C59092E04CDBC1F69FD0CE3",
 				"7A424C8C39B4C65DF0244372",
+				"AF7BA02D23DC5452AAE2F02E",
 				"75C7628FAB8BEC241243BCE1",
 				"3E7D1A9590715BD8CA17F2FA",
 				"ADB68426660F8DCF12742E2A",
 				"4C078E60C703AADC79B296DE",
 				"60E7015E9046F32B73F08A79",
 				"8A8B6C88C85E6C4BD6751B6B",
+				"0E8AA63CB2C7097DBB98E177",
 				"72BF3E051DAFB397017AEFAD",
 			);
 			"runOnlyForDeploymentPostprocessing" = 0;
@@ -622,6 +697,7 @@
 			"isa" = "PBXFrameworksBuildPhase";
 			"buildActionMask" = 2147483647;
 			"files" = (
+				"60FB29021DDCFFA5DB380D05",
 			);
 			"runOnlyForDeploymentPostprocessing" = 0;
 		};
@@ -646,6 +722,8 @@
 				"28299FE15D405FE3E6349119",
 				"F92E0ABFB2837559297E3CED",
 				"9A07814891C0FD132C012205",
+				"7292F933DF5551C1AA0C69CE",
+				"227E36ED2D54A4CD783403DF",
 				"2A45868A54A85B07444F790A",
 				"FF9F5CF91164A02B3E4285B8",
 				"A5D220AF06096D54EF0CD2E8",
@@ -728,7 +806,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.10";
+				"MARKETING_VERSION" = "0.1.11";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -752,7 +830,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.10";
+				"MARKETING_VERSION" = "0.1.11";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -785,7 +863,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.10";
+				"MARKETING_VERSION" = "0.1.11";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -807,7 +885,7 @@
 				"SUPPORTS_MACCATALYST" = "NO";
 				"SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD" = "NO";
 				"CURRENT_PROJECT_VERSION" = "1";
-				"MARKETING_VERSION" = "0.1.10";
+				"MARKETING_VERSION" = "0.1.11";
 				"LD_RUNPATH_SEARCH_PATHS" = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -839,6 +917,9 @@
 			"buildRules" = (
 			);
 			"dependencies" = (
+			);
+			"packageProductDependencies" = (
+				"E79D1E0380FD03A52BF596AA",
 			);
 			"name" = "AirPodsTranslator";
 			"productName" = "AirPodsTranslator";
@@ -893,6 +974,9 @@
 			"targets" = (
 				"A172CEDCAE47474B615C54D5",
 				"9F86D081884C7D659A2FEAA0",
+			);
+			"packageReferences" = (
+				"83498A33D176B1D99220FA6B",
 			);
 		};
 	};

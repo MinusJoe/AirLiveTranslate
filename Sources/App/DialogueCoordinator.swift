@@ -1,226 +1,400 @@
+import AVFAudio
 import Combine
-import Foundation
+import Translation
 
 @MainActor
 final class DialogueCoordinator: ObservableObject {
-    let listener: TranslationViewModel
+    enum Phase { case idle, preparing, capturing, finishing, enrolling, externalPlayback, privatePlayback, editing }
+    unowned let listener: TranslationViewModel
     let reply = ConversationReplyModel()
     @Published private(set) var language: AppLanguage
+    @Published private(set) var device: DialogueDevice = .phone
+    @Published private(set) var phase: Phase = .idle
     @Published private(set) var entries: [DialogueEntry] = []
-    @Published private(set) var amountQuestion: DialogueQuestion?
     @Published private(set) var editor: DialogueEditor?
+    @Published private(set) var message = ""
+    @Published private(set) var enrolled = false
     @Published private(set) var canShowTypingFallback = false
-    @Published private var handoff = DialogueHandoff()
-    private let chineseVariant: SpeechVariant
-    private var transcript: DialogueTranscript
-    private var subscriptions: Set<AnyCancellable> = []
-    private var openPage = false
-    private var waitingForPreparation = false
-    private var excludedContext: UUID?
+    @Published var configuration: TranslationSession.Configuration?
+    private var models: GroupSpeechAnalyzer?
+    private let audio = AudioController()
+    private var gallery = VoiceGallery()
+    private var owner: [[Float]] = []
+    private var history = DialogueTranscript(existing: [])
+    private(set) var minutes = MeetingMinutes()
+    private var epoch = UUID()
+    private var task: Task<Void, Never>?
+    private var earWorker: Task<Void, Never>?
+    private var earQueue: [(text: String, language: AppLanguage)] = []
+    private var devicePickedByUser = false
+    private var sessions: [AppLanguage: TranslationSession] = [:]
+    private var preparePair: (AppLanguage, AppLanguage)?
+    private var prepareWaiter: CheckedContinuation<Void, Error>?
+    private var attempted = Set<AppLanguage>()
+    private var afterDrain: (() -> Void)?
+    private var resumeAfterAction = false
+    private var isEditingPlayback = false
 
     init(listener: TranslationViewModel) {
         self.listener = listener
         language = ConversationTurn.partnerLanguage(source: listener.source, target: listener.target)
-        chineseVariant = listener.sourceVariant.language == .chinese ? listener.sourceVariant : .chineseMainland
-        transcript = DialogueTranscript(existing: listener.captions)
     }
 
-    var isListeningRequested: Bool { handoff.wantsListener }
-    var canBeginReply: Bool { openPage && editor == nil && handoff.replyToken == nil && reply.phase == .idle }
-    var canChangeLanguage: Bool { canBeginReply }
+    var realtimeBusy: Bool { listener.isBusy || listener.isRunning || listener.isReplaying }
+    var canAct: Bool { !realtimeBusy && (phase == .idle || phase == .capturing) }
+    var canBeginReply: Bool { canAct && editor == nil }
+    var canConfigureDialogue: Bool { phase == .idle && !realtimeBusy }
+    var amountQuestion: DialogueQuestion? {
+        guard let last = entries.last(where: { $0.speaker == .partner }), last.kind == .heard,
+              last.sourceLanguage == language else { return nil }
+        return DialogueQuestion.contextual(in: last.original)
+    }
 
+    /// Browsing never acquires, releases, or reconfigures the microphone.
     func open() {
-        guard !openPage, listener.awarenessConfirmed else { return }
-        openPage = true
-        // A live listener may already have heard the price the user wants to ask
-        // about. Import only its latest utterance, never a prior session's captions.
-        let carry = listener.isRunning && listener.source == language && listener.target == .chinese
-            ? listener.latestSessionCaptionID : nil
-        transcript = DialogueTranscript(existing: listener.captions.filter { $0.id != carry })
-        reply.warmResources(language: language, variant: chineseVariant)
-        listener.$captions.sink { [weak self] captions in
-            guard let self, self.openPage else { return }
-            self.transcript.observe(captions)
-            self.publishTranscript()
-        }.store(in: &subscriptions)
-        listener.$state.dropFirst().sink { [weak self] state in
-            guard let self, self.openPage, self.handoff.wantsListener else { return }
-            if state == .failed || state == .paused {
-                self.waitingForPreparation = false
-                self.handoff.pause()
-            } else if state == .idle, self.waitingForPreparation {
-                // @Published sends state in willSet; start only once the listener is configurable.
-                Task { @MainActor [weak self] in self?.startWhenPrepared() }
-            }
-        }.store(in: &subscriptions)
-        startListening()
+        if phase == .idle && !devicePickedByUser {
+            device = AudioController.headphonesSelected ? .headphones : .phone
+        }
+        do { enrolled = !(try WearerVoiceprint.read()).isEmpty }
+        catch { message = error.localizedDescription }
     }
 
     func selectLanguage(_ choice: AppLanguage) {
-        guard canChangeLanguage, choice != .chinese, choice != language else { return }
-        let shouldListen = handoff.wantsListener
-        pause()
+        guard canConfigureDialogue, choice != .chinese else { return }
         language = choice
-        reply.warmResources(language: choice, variant: chineseVariant)
-        excludedContext = entries.last(where: { $0.speaker == .partner })?.id
-        amountQuestion = nil
-        if shouldListen { startListening() }
     }
 
-    func startListening() {
-        guard openPage, editor == nil, listener.awarenessConfirmed, handoff.replyToken == nil else { return }
-        canShowTypingFallback = false
-        if listener.source != language || listener.target != .chinese {
-            stopPartner()
-            if listener.source != language { listener.source = language }
-            if listener.target != .chinese { listener.target = .chinese }
+    func selectDevice(_ choice: DialogueDevice) {
+        guard canConfigureDialogue else { return }
+        devicePickedByUser = true
+        device = choice
+    }
+
+    func start(enrollment: Bool = false, additional: Bool = false) {
+        guard phase == .idle, listener.reserveDialogueAudio() else { return }
+        gallery = VoiceGallery()
+        launch(enrollment: enrollment, newConversation: !enrollment, additional: additional)
+    }
+
+    private func launch(enrollment: Bool = false, newConversation: Bool = false, additional: Bool = false) {
+        let token = UUID()
+        epoch = token
+        let analyzer = models ?? GroupSpeechAnalyzer()
+        models = analyzer
+        let restoring = !enrollment && !newConversation && sessions[.chinese] != nil && sessions[language] != nil
+        attempted.removeAll()
+        phase = .preparing
+        message = restoring ? "正在恢复\(device == .phone ? "手机" : "对话")收音…" : "正在准备本机模型，首次使用需要下载…"
+        task = Task {
+            do {
+                if !restoring && (!enrollment || additional) {
+                    owner = try WearerVoiceprint.read()
+                    enrolled = !owner.isEmpty
+                }
+                if !enrollment && !restoring {
+                    for (from, to) in [(AppLanguage.chinese, language), (language, .chinese)] {
+                        let source = Locale.Language(identifier: from.rawValue)
+                        let target = Locale.Language(identifier: to.rawValue)
+                        let status = await LanguageAvailability().status(from: source, to: target)
+                        try validate(token)
+                        guard status != .unsupported else { throw PipelineError.message("设备不支持这个翻译方向。") }
+                        if status != .installed {
+                            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
+                                prepareWaiter = waiter
+                                preparePair = (from, to)
+                                configuration = .init(source: source, target: target)
+                                message = "请准备 \(from.name) → \(to.name) 的翻译资源。"
+                            }
+                            try validate(token)
+                        }
+                        sessions[from] = TranslationSession(installedSource: source, target: target)
+                    }
+                }
+                try await analyzer.prepare(enrollment: enrollment)
+                try validate(token)
+                guard await AudioController.requestPermission() else { throw PipelineError.message("请允许麦克风访问后重试。") }
+                try validate(token)
+                let side: OutputSide
+                switch device {
+                case .phone:
+                    side = .both
+                    try await audio.configurePhoneMicrophone()
+                case .headphones:
+                    side = listener.outputSide
+                    _ = try await audio.configure(source: listener.captureSource, side: side, farField: !enrollment)
+                }
+                try validate(token)
+                let fifo = try audio.start(side: side, onLevel: { _ in }, onRouteFailure: { [weak self] reason in
+                    self?.fail(reason, token: token)
+                })
+                if newConversation { history = DialogueTranscript(existing: []); minutes = MeetingMinutes(); entries = [] }
+                phase = enrollment ? .enrolling : .capturing
+                message = enrollment ? "请一个人自然说约五秒，然后停顿。可以中英文混说。" : "正在连续听译"
+                try await analyzer.consume(fifo, enrollment: enrollment, receive: { [weak self] line in
+                    guard let self else { throw CancellationError() }
+                    try await self.receive(line, token: token)
+                }, register: { [weak self] vector in
+                    guard let self else { throw CancellationError() }
+                    try self.validate(token)
+                    try WearerVoiceprint.save(vector, additional: additional)
+                    self.enrolled = true
+                })
+                try validate(token)
+                audio.stop()
+                task = nil
+                if let next = afterDrain { afterDrain = nil; next() }
+                else { reset(enrollment ? "我的声纹已保存在本机。" : "本次连续对话已结束。") }
+            } catch { fail(error.localizedDescription, token: token) }
         }
-        handoff.listen()
-        guard !listener.isRunning && !listener.isBusy else { return }
-        if listener.resourcesReady {
-            waitingForPreparation = false
-            listener.start()
-        } else {
-            waitingForPreparation = true
-            listener.requestPreparation(forListening: true)
+    }
+
+    func prepare(using session: TranslationSession) async {
+        guard phase == .preparing, let (from, to) = preparePair, !attempted.contains(from),
+              session.sourceLanguage?.languageCode == Locale.Language(identifier: from.rawValue).languageCode,
+              session.targetLanguage?.languageCode == Locale.Language(identifier: to.rawValue).languageCode else { return }
+        attempted.insert(from)
+        let token = epoch
+        do {
+            try await session.prepareTranslation()
+            try validate(token)
+            guard await LanguageAvailability().status(from: Locale.Language(identifier: from.rawValue),
+                                                      to: Locale.Language(identifier: to.rawValue)) == .installed
+            else { throw PipelineError.message("翻译资源尚未安装完成。") }
+            try validate(token)
+            preparePair = nil
+            configuration = nil
+            prepareWaiter?.resume()
+            prepareWaiter = nil
+        } catch { fail(error.localizedDescription, token: token) }
+    }
+
+    private func receive(_ line: GroupUtterance, token: UUID) async throws {
+        try validate(token)
+        let party: VoiceParty = line.mixed ? .unidentified : gallery.identify(line.embedding, owner: owner, language: line.source)
+        guard let source = line.source, source == .chinese || source == language else {
+            history.addSpoken(line, translation: "", party: party, direction: nil)
+            publishLine()
+            message = "这句语言未确认或不在当前语言组合，已保留原文。"
+            return
+        }
+        let direction = GroupDirection(source: source, partner: language, party: party, enrolled: !owner.isEmpty,
+                                       mixed: line.mixed, device: device)
+        let translation: String
+        if source == direction.target { translation = line.text }
+        else {
+            guard let session = sessions[source] else { throw PipelineError.message("翻译没有就绪。") }
+            do {
+                translation = try await session.translate(line.text).targetText
+                guard !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw PipelineError.message("这句话没有返回译文。")
+                }
+            } catch {
+                try validate(token)
+                history.addSpoken(line, translation: "", party: party, direction: nil)
+                publishLine()
+                message = "这句翻译失败，已保留原文。"
+                return
+            }
+        }
+        try validate(token)
+        history.addSpoken(line, translation: translation, party: party, direction: direction)
+        publishLine()
+        if direction.automaticHeadphones && phase == .capturing {
+            enqueueEarpiece(translation, language: direction.target, token: token)
         }
     }
 
-    private func startWhenPrepared() {
-        guard openPage, waitingForPreparation, handoff.wantsListener, listener.state == .idle,
-              listener.resourcesReady else { return }
-        waitingForPreparation = false
-        listener.start()
+    private func enqueueEarpiece(_ text: String, language: AppLanguage, token: UUID) {
+        guard device == .headphones, phase == .capturing else { return }
+        if earQueue.count >= 8 { earQueue.removeFirst(); message = "耳机播报积压，较早的译文可看字幕。" }
+        earQueue.append((text, language))
+        guard earWorker == nil else { return }
+        earWorker = Task {
+            do {
+                while phase == .capturing && !earQueue.isEmpty {
+                    let item = earQueue.removeFirst()
+                    do {
+                        for part in ReplayPolicy.chunks(for: item.text) {
+                            try validate(token)
+                            try await audio.speak(part, language: item.language, rate: Float(listener.speakingRate))
+                        }
+                    } catch PipelineError.synthesisBacklog {
+                        try validate(token)
+                        message = "这句未完整播出，字幕已保留。正在继续听译。"
+                    }
+                }
+                if epoch == token { earWorker = nil }
+            } catch { if !Task.isCancelled { fail(error.localizedDescription, token: token) } }
+        }
     }
 
-    func press() {
-        guard let token = takeOutgoingTurn() else { return }
-        reply.start(language: language, variant: chineseVariant, source: listener.captureSource,
-                    rate: Float(listener.speakingRate),
-                    onStopped: { [weak self] in self?.stopped(token) },
-                    onPlayed: { [weak self] in self?.played(token) })
+    func end() {
+        if phase == .capturing { drain(then: nil) }
+        else { reset("已停止。") }
     }
 
-    func release() {
-        guard openPage, handoff.replyToken != nil else { return }
-        reply.finish()
+    private func drain(then next: (() -> Void)?) {
+        afterDrain = next
+        phase = .finishing
+        message = "正在处理最后一段发言…"
+        earWorker?.cancel(); earWorker = nil; earQueue.removeAll()
+        audio.finishTurnCapture()
     }
 
-    func ask(_ prompt: DialogueQuestion) {
-        if case .confirm = prompt, prompt != amountQuestion { return }
-        guard let phrase = prompt.phrase(in: language), let token = takeOutgoingTurn() else { return }
-        reply.speakPrompt(original: prompt.label, translated: phrase, language: language,
-                          rate: Float(listener.speakingRate),
-                          onStopped: { [weak self] in self?.stopped(token, offerTyping: prompt == .writeNumber) },
-                          onPlayed: { [weak self] in self?.played(token, prompt: prompt) })
+    private func quietForAction(_ action: @escaping () -> Void) {
+        guard canAct, listener.reserveDialogueAudio() else { return }
+        resumeAfterAction = phase == .capturing
+        if resumeAfterAction { drain(then: action) } else { action() }
     }
 
-    private func takeOutgoingTurn() -> UUID? {
-        guard canBeginReply, let token = handoff.beginReply() else { return nil }
-        canShowTypingFallback = false
-        waitingForPreparation = false
-        stopPartner()
-        return token
+    func play(_ entry: DialogueEntry) {
+        guard canAct, let row = entries.first(where: { $0.id == entry.id }),
+              let destination = row.playback(in: device) else { return }
+        switch destination {
+        case .phoneSpeaker(let target):
+            quietForAction { [weak self] in
+                self?.publicSpeech(original: row.original, text: row.translated, language: target, question: nil)
+            }
+        case .earpiece(let target):
+            hearPrivately(row.translated, language: target)
+        }
     }
 
-    private func played(_ token: UUID, prompt: DialogueQuestion? = nil) {
-        let needsInput = prompt == .writeNumber
-        guard openPage, handoff.finishPlayback(token, resumeListening: !needsInput) else { return }
-        transcript.addReply(original: reply.original, translated: reply.translated,
-                            kind: prompt == nil ? .reply(reply.language) : .prompt)
-        publishTranscript()
-        if needsInput {
-            editor = DialogueEditor(purpose: .partnerInput, language: reply.language)
-        } else { startListening() }
+    private func hearPrivately(_ text: String, language: AppLanguage) {
+        guard device == .headphones else { return }
+        let token = epoch
+        if phase == .capturing {
+            enqueueEarpiece(text, language: language, token: token)
+            return
+        }
+        guard listener.reserveDialogueAudio() else { return }
+        phase = .privatePlayback
+        message = "正在耳机中播放译文。"
+        task = Task {
+            do {
+                _ = try await audio.configurePlayback(side: listener.outputSide) { [weak self] reason in
+                    self?.fail(reason, token: token)
+                }
+                for chunk in ReplayPolicy.chunks(for: text) {
+                    try validate(token)
+                    try await audio.speak(chunk, language: language, rate: Float(listener.speakingRate))
+                }
+                try validate(token)
+                reset("耳机播放完成。")
+            } catch { fail(error.localizedDescription, token: token) }
+        }
     }
 
-    func beginCorrection(of entryID: UUID) {
-        guard canBeginReply, let draft = transcript.editorForCorrection(of: entryID) else { return }
-        pause()
-        editor = draft
+    func ask(_ question: DialogueQuestion) {
+        if case .confirm = question, amountQuestion != question { return }
+        guard let phrase = question.phrase(in: language) else { return }
+        quietForAction { [weak self] in
+            guard let self else { return }
+            self.publicSpeech(original: question.label, text: phrase, language: self.language, question: question)
+        }
     }
 
-    func submitEditor(_ editorID: UUID, text: String) {
-        guard openPage, let draft = editor, draft.id == editorID, draft.accepts(text),
-              handoff.replyToken == nil, reply.phase == .idle else { return }
-        switch draft.purpose {
-        case .partnerInput:
-            guard transcript.addPartnerInput(text, editor: draft) else { return }
-            publishTranscript()
-            editor = nil
-            startListening()
-        case .correction(let entryID):
-            guard transcript.editorForCorrection(of: entryID) != nil, let token = handoff.beginReply() else { return }
-            reply.speakCorrection(text, language: draft.language, rate: Float(listener.speakingRate),
-                                  onStopped: { [weak self] in self?.stopped(token) },
-                                  onPlayed: { [weak self] in
-                guard let self, self.openPage, self.editor?.id == editorID,
-                      self.handoff.finishPlayback(token) else { return }
-                guard self.transcript.recordCorrection(of: entryID, original: text, translated: self.reply.translated) else {
-                    self.handoff.pause()
-                    self.editor = nil
+    private func publicSpeech(original: String, text: String, language: AppLanguage, question: DialogueQuestion?) {
+        phase = .externalPlayback
+        message = "正在用手机扬声器播放，收音已暂停。"
+        let token = epoch
+        reply.speakPrompt(original: original, translated: text, language: language, rate: Float(listener.speakingRate),
+                          onStopped: { [weak self] in
+            guard let self, self.epoch == token else { return }
+            self.reset(self.reply.message)
+            self.canShowTypingFallback = question == .writeNumber
+        }, onPlayed: { [weak self] in
+            guard let self, self.epoch == token else { return }
+            if let question {
+                self.history.addReply(original: original, translated: text, kind: .prompt, language: language)
+                self.publishLine()
+                if question == .writeNumber {
+                    self.editor = DialogueEditor(purpose: .partnerInput, language: language)
+                    self.phase = .editing
                     return
                 }
-                self.publishTranscript()
-                self.editor = nil
-                self.startListening()
+            }
+            self.completeAction()
+        })
+    }
+
+    func beginCorrection(of id: UUID) {
+        guard let draft = history.editorForCorrection(of: id) else { return }
+        quietForAction { [weak self] in self?.editor = draft; self?.phase = .editing }
+    }
+
+    func submitEditor(_ id: UUID, text: String) {
+        guard phase == .editing, !isEditingPlayback, let draft = editor, draft.id == id, draft.accepts(text) else { return }
+        switch draft.purpose {
+        case .partnerInput:
+            guard history.addPartnerInput(text, editor: draft) else { return }
+            publishLine()
+            completeAction()
+        case .correction(let oldID):
+            isEditingPlayback = true
+            let token = epoch
+            reply.speakCorrection(text, language: draft.language, rate: Float(listener.speakingRate), onStopped: { [weak self] in
+                guard let self, self.epoch == token else { return }
+                self.isEditingPlayback = false
+            }, onPlayed: { [weak self] in
+                guard let self, self.epoch == token, self.editor?.id == id else { return }
+                _ = self.history.recordCorrection(of: oldID, original: text, translated: self.reply.translated)
+                self.publishLine()
+                self.completeAction()
             })
         }
     }
 
-    func cancelEditor(_ editorID: UUID) {
-        guard editor?.id == editorID else { return }
-        pause()
-        editor = nil
-    }
-
-    private func stopped(_ token: UUID, offerTyping: Bool = false) {
-        guard openPage, handoff.replyToken == token else { return }
-        handoff.failedReply(token)
-        canShowTypingFallback = offerTyping
-    }
-
+    func cancelEditor(_ id: UUID) { if editor?.id == id { reset("已取消，收音保持关闭。") } }
     func showTypingFallback() {
-        guard canShowTypingFallback, canBeginReply else { return }
-        pause()
-        editor = DialogueEditor(purpose: .partnerInput, language: language)
-    }
-
-    private func publishTranscript() {
-        guard entries != transcript.entries else { return }
-        let old = entries.last(where: { $0.speaker == .partner })
-        entries = transcript.entries
-        let latest = entries.last(where: { $0.speaker == .partner })
-        if latest?.id != old?.id || latest?.isProvisional != old?.isProvisional || latest?.original != old?.original {
-            if let latest, latest.kind == .heard, !latest.isProvisional, latest.id != excludedContext {
-                amountQuestion = DialogueQuestion.contextual(in: latest.original)
-            } else { amountQuestion = nil }
+        guard canShowTypingFallback else { return }
+        quietForAction { [weak self] in
+            guard let self else { return }
+            self.canShowTypingFallback = false
+            self.editor = DialogueEditor(purpose: .partnerInput, language: self.language)
+            self.phase = .editing
         }
     }
 
-    private func stopPartner() {
-        if listener.isRunning || listener.isBusy || listener.isReplaying { listener.stop() }
-    }
-
-    func cancelReply() {
-        guard handoff.replyToken != nil else { return }
-        handoff.pause()
-        reply.cancel()
-    }
-
-    func pause() {
-        handoff.pause()
-        canShowTypingFallback = false
-        waitingForPreparation = false
-        reply.cancel()
-        stopPartner()
-    }
-
-    func close() {
-        guard openPage else { return }
-        openPage = false
-        subscriptions.removeAll()
-        pause()
+    private func completeAction() {
         editor = nil
+        isEditingPlayback = false
+        if resumeAfterAction { resumeAfterAction = false; launch() }
+        else { reset("已完成。") }
+    }
+
+    func removeVoiceprint() {
+        guard phase == .idle else { return }
+        do { try WearerVoiceprint.delete(); owner = []; enrolled = false; message = "已删除我的声纹。" }
+        catch { message = error.localizedDescription }
+    }
+
+    private func validate(_ token: UUID) throws {
+        try Task.checkCancellation()
+        guard epoch == token else { throw CancellationError() }
+    }
+
+    private func publishLine() {
+        if let last = history.entries.last { minutes.recordDialogue(last) }
+        entries = history.entries
+    }
+    private func fail(_ reason: String, token: UUID) { if epoch == token { reset(reason) } }
+    private func reset(_ note: String) {
+        epoch = UUID()
+        afterDrain = nil
+        task?.cancel(); task = nil
+        earWorker?.cancel(); earWorker = nil; earQueue.removeAll()
+        reply.cancel()
+        audio.stop()
+        sessions.values.forEach { $0.cancel() }; sessions.removeAll()
+        preparePair = nil; configuration = nil; editor = nil
+        prepareWaiter?.resume(throwing: CancellationError())
+        prepareWaiter = nil
+        gallery = VoiceGallery(); owner = []
+        resumeAfterAction = false; isEditingPlayback = false; canShowTypingFallback = false
+        models = nil
+        phase = .idle
+        listener.releaseDialogueAudio()
+        message = note
     }
 }

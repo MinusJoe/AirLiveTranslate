@@ -17,7 +17,6 @@ struct ContentView: View {
     @State private var askAwareness = false
     @State private var askSkip = false
     @State private var showConversation = false
-    @State private var askConversationAwareness = false
     @State private var startAfterPreparation = false
 
     var body: some View {
@@ -43,19 +42,10 @@ struct ContentView: View {
                             requestReplay: { performReplay($0) })
             }
             .sheet(item: $meetingSheet) { meeting in
-                MeetingMinutesView(minutes: meeting, listening: model.isRunning || model.isBusy, savedSummary: $savedSummary)
+                MeetingMinutesView(minutes: meeting, listening: model.isRunning || model.isBusy || model.dialogueOwnsAudio, savedSummary: $savedSummary)
             }
             .sheet(isPresented: $showConversation) {
                 ConversationView(model: model)
-            }
-            .confirmationDialog("进入面对面对话？", isPresented: $askConversationAwareness, titleVisibility: .visible) {
-                Button("已告知对方，开始对话") {
-                    model.awarenessConfirmed = true
-                    openConversation()
-                }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("请先告知对方正在听译。按住说中文，松手后手机会播放译文，播完会自动继续听对方。")
             }
             .confirmationDialog("结束这次听译？", isPresented: $askEnd, titleVisibility: .visible) {
                 Button("结束并查看会议纪要") {
@@ -91,7 +81,8 @@ struct ContentView: View {
         }
         .tint(AudioTheme.accent)
         .environmentObject(meetingPreferences)
-        .translationTask(showConversation ? nil : model.translationConfiguration) { session in
+        .background { GroupTranslationPreparation(coordinator: model.dialogue) }
+        .translationTask(model.translationConfiguration) { session in
             await model.prepareResources(using: session)
         }
         .task { await model.refreshVariants() }
@@ -117,7 +108,7 @@ struct ContentView: View {
                 }
                 .foregroundStyle(AudioTheme.text)
                 .accessibilityLabel("会议纪要")
-                Button { model.stopReplay(); showSettings = true } label: {
+                Button { showSettings = true } label: {
                     Image(systemName: "slider.horizontal.3")
                         .font(.body.weight(.medium))
                         .frame(width: 44, height: 44)
@@ -133,8 +124,7 @@ struct ContentView: View {
                     .background(AudioTheme.canvas, in: RoundedRectangle(cornerRadius: 11, style: .continuous))
                     .accessibilityAddTraits(.isSelected)
                 Button {
-                    if model.awarenessConfirmed { openConversation() }
-                    else { askConversationAwareness = true }
+                    showConversation = true
                 } label: {
                     Label("面对面对话", systemImage: "bubble.left.and.bubble.right")
                         .frame(maxWidth: .infinity, minHeight: 44)
@@ -286,7 +276,7 @@ struct ContentView: View {
             HStack(spacing: 7) {
                 Circle().fill(model.microphoneActive || model.isReplaying ? AudioTheme.accent : AudioTheme.secondary)
                     .frame(width: 7, height: 7)
-                Text(model.isReplaying ? "重播译文 · 收音已暂停" : model.isRunning ? "正在听译" : model.state.rawValue)
+                Text(model.dialogueOwnsAudio ? "面对面对话使用中" : model.isReplaying ? "重播译文 · 收音已暂停" : model.isRunning ? "正在听译" : model.state.rawValue)
             }
             .font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
             if !model.isRunning && !model.replayMessage.isEmpty {
@@ -295,7 +285,9 @@ struct ContentView: View {
             }
             HStack(spacing: 12) {
                 Button {
-                    if model.isReplaying {
+                    if model.dialogueOwnsAudio {
+                        showConversation = true
+                    } else if model.isReplaying {
                         model.stopReplay()
                     } else if model.isRunning || model.isBusy {
                         startAfterPreparation = false
@@ -304,11 +296,11 @@ struct ContentView: View {
                         askAwareness = true
                     } else { begin() }
                 } label: {
-                    AudioActionLabel(title: primaryTitle, symbol: model.isReplaying ? "stop.fill" : model.isRunning || model.isBusy ? "pause.fill" : "play.fill",
+                    AudioActionLabel(title: primaryTitle, symbol: model.dialogueOwnsAudio ? "bubble.left.and.bubble.right" : model.isReplaying ? "stop.fill" : model.isRunning || model.isBusy ? "pause.fill" : "play.fill",
                              level: model.inputLevel, listening: model.microphoneActive)
                 }
                 .buttonStyle(.plain)
-                if model.isRunning || model.isBusy || model.isReplaying || !model.captions.isEmpty {
+                if !model.dialogueOwnsAudio && (model.isRunning || model.isBusy || model.isReplaying || !model.captions.isEmpty) {
                     Button {
                         startAfterPreparation = false
                         if model.readableMinutes.lines.isEmpty { savedSummary = nil; model.end() }
@@ -329,17 +321,12 @@ struct ContentView: View {
     }
 
     private var primaryTitle: String {
+        if model.dialogueOwnsAudio { return "返回面对面对话" }
         if model.isReplaying { return "停止重播" }
         if model.state == .buffering { return "暂停收音" }
         if model.isBusy { return "取消准备" }
         if model.isRunning { return "暂停听译" }
         return model.state == .paused ? "继续听译" : "开始听译"
-    }
-
-    private func openConversation() {
-        startAfterPreparation = false
-        if model.isBusy || model.isReplaying { model.stop(reason: "已进入面对面对话。") }
-        showConversation = true
     }
 
     private func begin() {
@@ -373,5 +360,13 @@ struct ContentView: View {
         guard startAfterPreparation, model.resourcesReady, model.state == .idle else { return }
         startAfterPreparation = false
         model.start()
+    }
+}
+
+private struct GroupTranslationPreparation: View {
+    @ObservedObject var coordinator: DialogueCoordinator
+    var body: some View {
+        Color.clear.allowsHitTesting(false)
+            .translationTask(coordinator.configuration) { session in await coordinator.prepare(using: session) }
     }
 }

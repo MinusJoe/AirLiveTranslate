@@ -5,6 +5,7 @@ struct MeetingLine: Identifiable, Sendable {
     let time: Date
     let original: String
     var translated = ""
+    var participant: String?
 }
 
 enum MeetingFactKind: String, CaseIterable {
@@ -81,6 +82,13 @@ struct MeetingMinutes: Identifiable, Sendable {
         else { pending[id]?.translated = text }
     }
 
+    mutating func recordDialogue(_ row: DialogueEntry, at date: Date = Date()) {
+        var participant = row.participantLabel ?? (row.speaker == .me ? "我" : "对方")
+        if case .correction = row.kind { participant += " · 更正" }
+        if row.kind == .typed { participant += " · 填写" }
+        confirm(MeetingLine(id: row.id, time: date, original: row.original, translated: row.translated, participant: participant))
+    }
+
     mutating func discardUnconfirmed() { pending.removeAll() }
 
     func export(summary: String?) -> String {
@@ -92,7 +100,7 @@ struct MeetingMinutes: Identifiable, Sendable {
         if omitted > 0 { sections.append("记录达到上限，另有 \(omitted) 段未收录。") }
         sections.append("会议记录 · 已定稿")
         for (index, line) in lines.enumerated() {
-            var text = "[\(index + 1)] \(clock.string(from: line.time))\n" + line.original
+            var text = "[\(index + 1)] \(clock.string(from: line.time))" + (line.participant.map { " · " + $0 } ?? "") + "\n" + line.original
             if !line.translated.isEmpty { text += "\n" + line.translated }
             sections.append(text)
         }
@@ -111,7 +119,7 @@ struct MeetingMinutes: Identifiable, Sendable {
         var current = Chunk()
         var count = 0
         for (index, line) in lines.enumerated() {
-            let prefix = "[\(index + 1)] "
+            let prefix = "[\(index + 1)] " + (line.participant.map { String($0.prefix(10)) + "：" } ?? "")
             var rest = line.original[...]
             while !rest.isEmpty {
                 let piece = rest.prefix(limit - prefix.count)

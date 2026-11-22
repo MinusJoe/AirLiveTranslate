@@ -31,6 +31,7 @@ final class AudioController {
     private var expectedOutputUID: String?
     private var selectedSource: CaptureSource = .headset
     private var captureRequired = false
+    private var phoneInputOnly = false
     private var requiresFarField = false
     private var partnerSpeaker = false
     private var selectedSide: OutputSide = .both
@@ -41,6 +42,11 @@ final class AudioController {
     init() { synthesizer.usesApplicationAudioSession = true }
 
     var inputFormat: AVAudioFormat { engine.inputNode.outputFormat(forBus: 0) }
+
+    static var headphonesSelected: Bool {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        return outputs.count == 1 && outputs.first.map(Self.isHeadphone) == true
+    }
 
     static func requestPermission() async -> Bool {
         await withCheckedContinuation { continuation in
@@ -136,6 +142,49 @@ final class AudioController {
         return snapshot
     }
 
+    /// Face-to-face on a bare phone has no playback graph while recording.
+    /// Loudspeaker playback is a separate operation after the tap has been removed.
+    func configurePhoneMicrophone() async throws {
+        try Task.checkCancellation()
+        stop()
+        snapshot = AudioSnapshot()
+        selectedSource = .phone
+        selectedSide = .both
+        requiresFarField = false
+        captureRequired = true
+        phoneInputOnly = true
+        try session.setCategory(.record, mode: .default, options: [])
+        try session.setActive(true)
+        ownsActiveSession = true
+        var nextRequest: TimeInterval = 0
+        var observedMic: String?
+        var observedSince: TimeInterval = 0
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            let now = ProcessInfo.processInfo.systemUptime
+            let inputs = session.currentRoute.inputs
+            if inputs.count == 1, let mic = inputs.first, mic.portType == .builtInMic {
+                if observedMic != mic.uid { observedMic = mic.uid; observedSince = now }
+                if now - observedSince >= 0.15 {
+                    expectedInputUID = mic.uid
+                    snapshot.hasBeenChecked = true
+                    snapshot.inputName = mic.portName
+                    snapshot.outputName = "仅收音"
+                    snapshot.detail = "使用 iPhone 麦克风，点喇叭时播放译文。"
+                    try validateRoute()
+                    return
+                }
+            } else { observedMic = nil }
+            if now >= nextRequest, let mic = session.availableInputs?.first(where: { $0.portType == .builtInMic }),
+               session.preferredInput?.uid != mic.uid || observedMic == nil {
+                try? session.setPreferredInput(mic)
+                nextRequest = now + 1
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw PipelineError.message("未能启用 iPhone 内置麦克风，请检查输入设备后重试。" + routeSummary())
+    }
+
     /// Replay never asks for microphone access, creates an input node, or starts a capture tap.
     func configurePlayback(side: OutputSide, onRouteFailure: @escaping @MainActor (String) -> Void) async throws -> AudioSnapshot {
         try Task.checkCancellation()
@@ -184,9 +233,11 @@ final class AudioController {
     func start(side: OutputSide, onLevel: @escaping @MainActor (Float) -> Void,
                onRouteFailure: @escaping @MainActor (String) -> Void)
         throws -> BufferedMicrophoneAudio {
-        snapshot = inspectRoute()
-        guard snapshot.output.permits(side) else {
-            throw PipelineError.message("当前路由不能保证指定耳播放。请主动选择双耳，或更换支持左右声道的路由。")
+        if !phoneInputOnly {
+            snapshot = inspectRoute()
+            guard snapshot.output.permits(side) else {
+                throw PipelineError.message("当前路由不能保证指定耳播放。请主动选择双耳，或更换支持左右声道的路由。")
+            }
         }
         selectedSide = side
         try validateRoute()
@@ -291,7 +342,7 @@ final class AudioController {
         synthesizer.stopSpeaking(at: .immediate)
         playbackCompletionContinuation?.finish(throwing: CancellationError())
         playbackCompletionContinuation = nil
-        player.stop()
+        if player.engine != nil { player.stop() }
     }
 
     func finishTurnCapture() {
@@ -357,6 +408,7 @@ final class AudioController {
         expectedInputUID = nil
         expectedOutputUID = nil
         captureRequired = false
+        phoneInputOnly = false
         engine = AVAudioEngine()
         player = AVAudioPlayerNode()
         if partnerSpeaker {
@@ -443,6 +495,13 @@ final class AudioController {
 
     private func validateRoute() throws {
         let route = session.currentRoute
+        if phoneInputOnly {
+            guard captureRequired, session.category == .record, route.inputs.count == 1,
+                  let mic = route.inputs.first, mic.portType == .builtInMic, mic.uid == expectedInputUID else {
+                throw PipelineError.message("iPhone 内置麦克风已切换，请重新开始手机对话。" + routeSummary())
+            }
+            return
+        }
         if partnerSpeaker {
             guard !captureRequired, session.category == .playAndRecord, route.outputs.count == 1,
                   let port = route.outputs.first, port.portType == .builtInSpeaker, port.uid == expectedOutputUID else {
@@ -502,7 +561,7 @@ final class AudioController {
                         var invalid: String?
                         do { try self.validateRoute() } catch { invalid = error.localizedDescription }
                         let running = self.engine.isRunning
-                        let formatsOK = running && self.expectedHardwareOutput == self.engine.outputNode.outputFormat(forBus: 0)
+                        let formatsOK = running && (self.phoneInputOnly || self.expectedHardwareOutput == self.engine.outputNode.outputFormat(forBus: 0))
                             && (!self.captureRequired || self.capturedAudio?.format == self.inputFormat)
                         reason = signal.pauseReason(routeFailure: invalid, engineRunning: running, formatMatches: formatsOK)
                         if reason == nil, signal == .engineChanged, self.hasScheduledSpeech, !self.player.isPlaying {

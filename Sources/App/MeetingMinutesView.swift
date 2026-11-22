@@ -98,8 +98,10 @@ struct MeetingMinutesView: View {
                             HStack(alignment: .firstTextBaseline, spacing: 12) {
                                 Text("[\(index + 1)]").font(AudioTheme.meta).foregroundStyle(AudioTheme.accent)
                                 VStack(alignment: .leading, spacing: 6) {
-                                    Text(line.time, format: .dateTime.hour().minute().second())
-                                        .font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
+                                    HStack {
+                                        if let participant = line.participant { Text(participant) }
+                                        Text(line.time, format: .dateTime.hour().minute().second())
+                                    }.font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
                                     Text(line.translated.isEmpty ? line.original : line.translated)
                                         .font(.system(.title3, design: .default)).lineSpacing(3)
                                     if !line.translated.isEmpty {

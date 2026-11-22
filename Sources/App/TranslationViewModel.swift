@@ -42,6 +42,16 @@ final class TranslationViewModel: ObservableObject {
     }
     @Published var speakingRate: Double = 0.5
     @Published var awarenessConfirmed = false
+    @Published private(set) var dialogueOwnsAudio = false
+    lazy var dialogue = DialogueCoordinator(listener: self)
+
+    func reserveDialogueAudio() -> Bool {
+        guard !isRunning, !isBusy, !isReplaying else { return false }
+        dialogueOwnsAudio = true
+        return true
+    }
+
+    func releaseDialogueAudio() { dialogueOwnsAudio = false }
     @Published private(set) var state: SessionState = .idle
     @Published private(set) var message = "先准备语言资源，再检查耳机。首次下载需要联网。"
     @Published private(set) var snapshot = AudioSnapshot()
@@ -93,7 +103,7 @@ final class TranslationViewModel: ObservableObject {
     var isRunning: Bool { state == .listening }
     var microphoneActive: Bool { state == .buffering || isRunning }
     var isBusy: Bool { [.preparing, .checking, .starting, .buffering].contains(state) }
-    var canConfigure: Bool { !isBusy && !isRunning && !isReplaying }
+    var canConfigure: Bool { !dialogueOwnsAudio && !isBusy && !isRunning && !isReplaying }
     var unheardCaptions: [Caption] { captions.filter(ReplayPolicy.needsCatchUp) }
 
     func canReplay(_ caption: Caption) -> Bool { ReplayPolicy.canReplay(caption) }
@@ -428,6 +438,10 @@ final class TranslationViewModel: ObservableObject {
     }
 
     private func beginReplay(from candidates: [Caption]) {
+        guard !dialogueOwnsAudio else {
+            replayMessage = "请先结束面对面对话，再重播实时字幕。"
+            return
+        }
         let plan = ReplayPlan.make(from: candidates)
         guard !plan.items.isEmpty else {
             replayMessage = "所选内容不可重播。需有有效译文，且每条不超过 1800 字。"

@@ -39,8 +39,14 @@ struct DialogueEntry: Identifiable, Equatable {
     var isProvisional = false
     var kind: Kind = .heard
     var supersededBy: UUID?
+    var party: VoiceParty?
+    var sourceLanguage: AppLanguage?
+    var translatedLanguage: AppLanguage?
+    var overlapping = false
+    var participantLabel: String? { overlapping ? "多人发言 · 待确认" : party?.label }
 
     var speaker: Speaker {
+        if party == .wearer || party == .chineseSide { return .me }
         switch kind {
         case .heard, .typed: return .partner
         case .reply, .prompt, .correction: return .me
@@ -50,8 +56,21 @@ struct DialogueEntry: Identifiable, Equatable {
     var correctionLanguage: AppLanguage? {
         guard speaker == .me, supersededBy == nil else { return nil }
         switch kind {
-        case .reply(let language), .correction(let language, _): return language
+        case .reply(let language), .correction(let language, _):
+            return sourceLanguage == nil || sourceLanguage == .chinese ? language : nil
         default: return nil
+        }
+    }
+
+    func playback(in device: DialogueDevice) -> DialoguePlayback? {
+        guard supersededBy == nil, !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        switch kind {
+        case .reply(let language), .correction(let language, _): return .phoneSpeaker(language)
+        case .prompt: return translatedLanguage.map(DialoguePlayback.phoneSpeaker)
+        case .heard:
+            guard let language = translatedLanguage else { return nil }
+            return device == .phone ? .phoneSpeaker(language) : .earpiece(language)
+        case .typed: return nil
         }
     }
 }
@@ -84,7 +103,8 @@ struct DialogueTranscript {
         let positions = Dictionary(uniqueKeysWithValues: entries.indices.map { (entries[$0].id, $0) })
         for caption in captions where !removed.contains(caption.id) {
             let line = DialogueEntry(id: caption.id, original: caption.original,
-                                     translated: caption.translated, isProvisional: caption.isProvisional)
+                                     translated: caption.translated, isProvisional: caption.isProvisional,
+                                     translatedLanguage: caption.targetLanguage)
             if let index = positions[caption.id] {
                 if entries[index] != line { entries[index] = line }
             } else if !previousIDs.contains(caption.id) {
@@ -95,8 +115,17 @@ struct DialogueTranscript {
         trim()
     }
 
-    mutating func addReply(original: String, translated: String, kind: DialogueEntry.Kind) {
-        entries.append(DialogueEntry(id: UUID(), original: original, translated: translated, kind: kind))
+    mutating func addReply(original: String, translated: String, kind: DialogueEntry.Kind, language: AppLanguage? = nil) {
+        entries.append(DialogueEntry(id: UUID(), original: original, translated: translated, kind: kind, translatedLanguage: language))
+        trim()
+    }
+
+    mutating func addSpoken(_ line: GroupUtterance, translation: String, party: VoiceParty,
+                            direction: GroupDirection?) {
+        let kind: DialogueEntry.Kind = direction.flatMap { $0.isOutgoingReply ? .reply($0.target) : nil } ?? .heard
+        entries.append(DialogueEntry(id: UUID(), original: line.text, translated: translation,
+                                     kind: kind, party: party, sourceLanguage: line.source,
+                                     translatedLanguage: direction?.target, overlapping: line.mixed))
         trim()
     }
 

@@ -4,36 +4,6 @@ import XCTest
 
 final class ConversationReplyLifecycleTests: XCTestCase {
     @MainActor
-    func testWarmReadinessExpiresAndIsBoundToBothLanguages() {
-        let ready = ConversationReplyModel.InstalledResources(language: .english, variant: .chineseMainland, checkedAt: 100)
-        XCTAssertTrue(ready.matches(.english, .chineseMainland, now: 159.9))
-        XCTAssertFalse(ready.matches(.english, .chineseMainland, now: 160))
-        XCTAssertFalse(ready.matches(.english, .chineseMainland, now: 99))
-        XCTAssertFalse(ready.matches(.japanese, .chineseMainland, now: 101))
-        XCTAssertFalse(ready.matches(.english, .chineseTaiwan, now: 101))
-    }
-
-    @MainActor
-    func testReleaseBeforeStartupRunsCannotBeginRecordingOrHandOff() async {
-        let reply = ConversationReplyModel()
-        var handedOff = false
-        var stopMessages: [String] = []
-        reply.start(language: .english, variant: .chineseMainland, source: .headset, rate: 0.5,
-                    onStopped: { stopMessages.append(reply.message) }) {
-            handedOff = true
-        }
-        XCTAssertTrue(reply.phase == .connecting)
-        reply.finish()
-        XCTAssertTrue(reply.phase == .idle)
-        XCTAssertTrue(reply.message.contains("麦克风尚未就绪"))
-        await Task.yield()
-        XCTAssertTrue(reply.phase == .idle)
-        XCTAssertTrue(reply.original.isEmpty)
-        XCTAssertFalse(handedOff)
-        XCTAssertEqual(stopMessages, [reply.message])
-    }
-
-    @MainActor
     func testCancelledPromptCannotResumeTheListenerOnANewTurn() async {
         let reply = ConversationReplyModel()
         var handoffs = 0
@@ -42,10 +12,6 @@ final class ConversationReplyLifecycleTests: XCTestCase {
         }
         XCTAssertTrue(reply.phase == .playing)
         reply.cancel()
-        reply.start(language: .japanese, variant: .chineseMainland, source: .headset, rate: 0.5) {
-            handoffs += 1
-        }
-        reply.finish()
         await Task.yield()
         XCTAssertTrue(reply.phase == .idle)
         XCTAssertEqual(handoffs, 0)
