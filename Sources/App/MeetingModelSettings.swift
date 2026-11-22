@@ -79,10 +79,10 @@ struct MeetingModelSettings: View {
     @State private var loaded = false
 
     var body: some View {
-        Form {
+        List {
             Picker("总结方式", selection: $selected) {
                 ForEach(SummaryProvider.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }
+            }.font(.headline).surfaceRow()
             if selected == .custom {
                 Section {
                     TextField("https://example.com/v1", text: $config.baseURL)
@@ -92,10 +92,11 @@ struct MeetingModelSettings: View {
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                     Button("移除此地址已存的 Key", role: .destructive) { confirmDelete = true }
                         .disabled((try? config.endpoint()) == nil)
-                } header: { Text("Base URL 与凭据") } footer: {
+                } header: { AudioSectionTitle("Base URL 与凭据") } footer: {
                     Text("填写服务的 HTTPS API 根地址。Key 按地址保存在本机钥匙串。无需鉴权的服务可留空。")
                 }
-                Section("模型") {
+                .surfaceRow()
+                Section {
                     Picker("接口", selection: $config.api) {
                         ForEach(MeetingAPI.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                     }
@@ -112,17 +113,20 @@ struct MeetingModelSettings: View {
                             Text(value == .automatic ? "服务默认" : value.rawValue).tag(value)
                         }
                     }
-                }
+                } header: { AudioSectionTitle("模型") }
+                .surfaceRow()
             }
-            if !status.isEmpty { Text(status).font(.footnote) }
-            Button("保存设置") {
+            if !status.isEmpty { Text(status).font(.footnote).surfaceRow() }
+            Button {
                 do {
                     try preferences.save(selected, config, key: key.trimmingCharacters(in: .whitespacesAndNewlines))
                     key = ""
                     dismiss()
                 } catch { status = error.localizedDescription }
-            }
+            } label: { AudioActionLabel(title: "保存设置", symbol: "checkmark") }
+            .buttonStyle(.plain).listRowSeparator(.hidden).surfaceRow()
         }
+        .audioList()
         .navigationTitle("AI 模型").navigationBarTitleDisplayMode(.inline)
         .toolbar(.visible, for: .navigationBar)
         .onAppear {

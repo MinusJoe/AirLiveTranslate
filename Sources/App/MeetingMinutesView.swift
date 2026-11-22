@@ -45,16 +45,25 @@ struct MeetingMinutesView: View {
     var body: some View {
         NavigationStack {
             List {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let date = minutes.lines.first?.time {
+                        Text(date, format: .dateTime.year().month().day())
+                            .font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
+                    }
+                    AudioPageTitle("会议纪要")
+                }.listRowSeparator(.hidden).surfaceRow()
                 if minutes.lines.isEmpty {
-                    ContentUnavailableView("等待会议发言", systemImage: "text.bubble",
-                                           description: Text("开始听译后，已定稿的原文和已有译文会出现在这里。"))
+                    VStack(alignment: .leading, spacing: 9) {
+                        Text("等待会议发言").font(.title3)
+                        Text("开始听译后，这里会按时间收录定稿发言。").font(.subheadline).foregroundStyle(AudioTheme.secondary)
+                    }.padding(.vertical, 16).listRowSeparator(.hidden).surfaceRow()
                 } else {
-                    Section("AI 总结") {
+                    Section {
                         NavigationLink("模型设置 · " + preferences.provider.rawValue) { MeetingModelSettings() }
                             .disabled(request != nil)
                         if let summary {
                             if let label = savedSummary?.provider { Text("生成来源 · " + label).font(.caption) }
-                            Text(summary).textSelection(.enabled)
+                            Text(summary).font(.body).lineSpacing(5).textSelection(.enabled)
                         }
                         if preferences.provider == .apple, let unavailable {
                             Text(unavailable).foregroundStyle(.secondary)
@@ -71,7 +80,8 @@ struct MeetingMinutesView: View {
                             }
                         }
                         if summary != nil { Text("方括号中的编号对应下方原文。请核对决定、负责人和日期。").font(.caption) }
-                    }
+                    } header: { AudioSectionTitle("AI 总结") }
+                    .surfaceRow()
                     Section {
                         Button {
                             document = MinutesTextFile(minutes.export(summary: summary))
@@ -80,24 +90,30 @@ struct MeetingMinutesView: View {
                         if !notice.isEmpty { Text(notice).font(.footnote) }
                     } footer: {
                         Text("当前所见为打开时的记录。导出后可在「文件」中保留。")
-                    }
-                    Section("定稿记录 · \(minutes.lines.count) 段") {
-                        if minutes.omitted > 0 { Text("达到记录上限，另有 \(minutes.omitted) 段未收录。").foregroundStyle(.orange) }
+                    }.surfaceRow()
+                    Section {
+                        if minutes.omitted > 0 { Text("达到记录上限，另有 \(minutes.omitted) 段未收录。").foregroundStyle(AudioTheme.accent) }
                         ForEach(minutes.lines.indices, id: \.self) { index in
                             let line = minutes.lines[index]
-                            VStack(alignment: .leading, spacing: 5) {
-                                HStack {
-                                    Text("[\(index + 1)]")
+                            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                                Text("[\(index + 1)]").font(AudioTheme.meta).foregroundStyle(AudioTheme.accent)
+                                VStack(alignment: .leading, spacing: 6) {
                                     Text(line.time, format: .dateTime.hour().minute().second())
-                                }.font(.caption).foregroundStyle(.secondary)
-                                Text(line.original)
-                                if !line.translated.isEmpty { Text(line.translated).foregroundStyle(.secondary) }
-                            }.textSelection(.enabled)
+                                        .font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
+                                    Text(line.translated.isEmpty ? line.original : line.translated)
+                                        .font(.system(.title3, design: .default)).lineSpacing(3)
+                                    if !line.translated.isEmpty {
+                                        Text(line.original).font(.subheadline).foregroundStyle(AudioTheme.secondary)
+                                    }
+                                }
+                            }.padding(.vertical, 6).textSelection(.enabled)
                         }
-                    }
+                    } header: { AudioSectionTitle("定稿记录 · \(minutes.lines.count) 段") }
+                    .surfaceRow()
                 }
             }
-            .navigationTitle("会议纪要")
+            .audioList()
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
         }

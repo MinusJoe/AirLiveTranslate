@@ -240,6 +240,7 @@ final class AudioController {
         synthesizer.write(utterance, toBufferCallback: producer.receive)
         var inFlight = 0
         var started = false
+        var scheduledFinalBuffer = false
         do {
             for try await packet in pair.stream {
                 try Task.checkCancellation()
@@ -248,6 +249,7 @@ final class AudioController {
                 player.scheduleBuffer(packet.buffer, completionCallbackType: packet.completionType) { _ in
                     completions.continuation.yield(())
                 }
+                if packet.isFinal { scheduledFinalBuffer = true }
                 hasScheduledSpeech = true
                 if !player.isPlaying { player.play() }
                 if !started {
@@ -266,6 +268,9 @@ final class AudioController {
                       try await completionIterator.next() != nil else { throw CancellationError() }
                 inFlight -= 1
             }
+            try Task.checkCancellation()
+            guard playbackGeneration == token else { throw CancellationError() }
+            guard scheduledFinalBuffer else { throw PipelineError.message("语音播放未完成。") }
         } catch {
             if playbackGeneration == token { stopSpeech() }
             throw error
@@ -323,6 +328,16 @@ final class AudioController {
         try engine.start()
         try validateRoute()
         observeRoute(onFailure: onFailure)
+    }
+
+    /// A conversational handoff requires the last speaker buffer to finish and
+    /// the public override to be cleared. The listener then negotiates its own
+    /// private route before enabling the microphone.
+    func releasePartnerSpeaker() throws {
+        guard partnerSpeaker, engine.isRunning else { throw PipelineError.message("手机外放已中断，请点听对方重新收听。") }
+        try validateRoute()
+        try session.overrideOutputAudioPort(.none)
+        partnerSpeaker = false
     }
 
     func stop() {

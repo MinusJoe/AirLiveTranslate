@@ -46,6 +46,7 @@ final class TranslationViewModel: ObservableObject {
     @Published private(set) var message = "先准备语言资源，再检查耳机。首次下载需要联网。"
     @Published private(set) var snapshot = AudioSnapshot()
     @Published private(set) var captions: [Caption] = []
+    private(set) var latestSessionCaptionID: UUID?
     @Published private(set) var draft = ""
     @Published private(set) var pendingCount = 0
     @Published private(set) var pendingSpeechCount = 0
@@ -249,6 +250,7 @@ final class TranslationViewModel: ObservableObject {
         message = "正在连接麦克风。看到“已收音”后即可讲话。"
         draft = ""
         committer = StreamingCommitter(lowLatencyEnabled: requestedLowLatency, language: requestedSource)
+        latestSessionCaptionID = nil
         queue.removeAll()
         _ = speechQueue.removeAll()
         invalidatedIDs.removeAll()
@@ -542,6 +544,7 @@ final class TranslationViewModel: ObservableObject {
                 } else if committed.subtitleOnly {
                     caption.note = "识别已更正。旧译音尚未开始，已撤销；将播报这条更正后的内容。"
                 }
+                latestSessionCaptionID = caption.id
                 captions.append(caption)
                 try queue.append(segment)
             }

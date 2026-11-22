@@ -17,7 +17,8 @@ struct HighlightedCaptionText: View, Equatable {
                   let lower = AttributedString.Index(stringRange.lowerBound, within: value),
                   let upper = AttributedString.Index(stringRange.upperBound, within: value) else { continue }
             value[lower..<upper].inlinePresentationIntent = .stronglyEmphasized
-            value[lower..<upper].backgroundColor = Color.orange.opacity(0.16)
+            value[lower..<upper].foregroundColor = AudioTheme.text
+            value[lower..<upper].backgroundColor = AudioTheme.highlight
         }
         return value
     }

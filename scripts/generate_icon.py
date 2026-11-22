@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Draw the simple original waveform icon without third-party packages."""
+"""Render the blue sound-bar mark used in the app header."""
 import json
+import math
 from pathlib import Path
 import struct
 import zlib
@@ -9,24 +10,27 @@ ROOT = Path(__file__).resolve().parents[1]
 SIZE = 1024
 
 
-def capsule(x, y, cx, cy, width, height):
-    radius = width / 2
-    straight = max(0, height / 2 - radius)
-    dy = max(abs(y - cy) - straight, 0)
-    return (x - cx) ** 2 + dy ** 2 <= radius ** 2
-
-
 def main():
     rows = bytearray()
-    bars = [(320, 180), (416, 340), (512, 500), (608, 340), (704, 180)]
+    background = bytes((24, 84, 212))
+    bars = [(-6.5, 2, 10, (255, 255, 255)), (0, 0, 20, (255, 255, 255)), (6.5, -2, 13, (204, 217, 246))]
+    angle = math.radians(13)
+    cosine, sine = math.cos(angle), math.sin(angle)
+    unit = SIZE / 34
     for y in range(SIZE):
+        line = bytearray(background * SIZE)
+        if abs(y - SIZE / 2) < 12 * unit:
+            for x in range(int(6 * unit), int(28 * unit)):
+                dx, dy = (x + .5 - SIZE/2) / unit, (y + .5 - SIZE/2) / unit
+                u, v = dx*cosine + dy*sine, -dx*sine + dy*cosine
+                for cx, cy, height, color in bars:
+                    end = max(abs(v-cy) - (height/2 - 2), 0)
+                    coverage = min(1, (2 - math.hypot(u-cx, end)) * unit + .5)
+                    if coverage > 0:
+                        line[x*3:x*3+3] = bytes(round(a + coverage*(b-a)) for a,b in zip(background,color))
+                        break
         rows.append(0)
-        for x in range(SIZE):
-            blend = (x + y) / (2 * SIZE)
-            rgb = (int(12 + 10 * blend), int(26 + 24 * blend), int(48 + 25 * blend))
-            if any(capsule(x, y, cx, 512, 54, height) for cx, height in bars):
-                rgb = (122, 239, 216) if x < 512 else (233, 245, 255)
-            rows.extend(rgb)
+        rows.extend(line)
     def chunk(kind, data):
         return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
     png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', SIZE, SIZE, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(bytes(rows), 9)) + chunk(b'IEND', b'')
