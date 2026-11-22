@@ -51,6 +51,7 @@ struct MeetingMinutes: Identifiable, Sendable {
     let id = UUID()
     private(set) var lines: [MeetingLine] = []
     private(set) var omitted = 0
+    private(set) var attributionRevision = 0
     private var positions: [UUID: Int] = [:]
     private var pending: [UUID: MeetingLine] = [:]
     private let limit: Int
@@ -87,6 +88,13 @@ struct MeetingMinutes: Identifiable, Sendable {
         if case .correction = row.kind { participant += " · 更正" }
         if row.kind == .typed { participant += " · 填写" }
         confirm(MeetingLine(id: row.id, time: date, original: row.original, translated: row.translated, participant: participant))
+    }
+
+    mutating func updateAttribution(_ row: DialogueEntry) {
+        guard let index = positions[row.id] else { return }
+        lines[index].participant = row.participantLabel
+        lines[index].translated = row.translated
+        attributionRevision += 1
     }
 
     mutating func discardUnconfirmed() { pending.removeAll() }

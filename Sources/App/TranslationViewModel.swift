@@ -16,6 +16,8 @@ enum SessionState: String {
 
 @MainActor
 final class TranslationViewModel: ObservableObject {
+    let modelPreferences = MeetingModelPreferences()
+    let modelLibrary = ModelLibrary()
     @Published var source: AppLanguage = .english {
         didSet {
             guard oldValue != source else { return }
@@ -85,7 +87,7 @@ final class TranslationViewModel: ObservableObject {
     private var activeSpeechID: UUID?
     private var speechEpoch = SessionEpoch()
     private var playbackCutoffUptime: TimeInterval = 0
-    private var translator: TranslationSession?
+    private var translator: TextTranslationRoute?
     private var launchTask: Task<Void, Never>?
     private var pipelineTask: Task<Void, Never>?
     private var speechTask: Task<Void, Never>?
@@ -98,7 +100,7 @@ final class TranslationViewModel: ObservableObject {
     private var finishedMinutes: MeetingMinutes?
     var readableMinutes: MeetingMinutes { minutes.lines.isEmpty ? (finishedMinutes ?? minutes) : minutes }
 
-    var languageKey: String { "\(source.rawValue):\(sourceVariant.rawValue)>\(target.rawValue)" }
+    var languageKey: String { "\(source.rawValue):\(sourceVariant.rawValue)>\(target.rawValue):\(modelPreferences.provider(for: .live).rawValue)" }
     var resourcesReady: Bool { preparedKey == languageKey }
     var isRunning: Bool { state == .listening }
     var microphoneActive: Bool { state == .buffering || isRunning }
@@ -135,6 +137,28 @@ final class TranslationViewModel: ObservableObject {
         preparedKey = nil
         state = .preparing
         message = "正在检查离线语言资源，麦克风尚未开启。"
+        if modelPreferences.provider(for: .live) == .custom {
+            let variant = sourceVariant
+            let resourceKey = languageKey
+            launchTask = Task {
+                do {
+                    try await modelLibrary.installSpeech(variant)
+                    try Task.checkCancellation()
+                    guard epoch.accepts(token) else { return }
+                    guard AVSpeechSynthesisVoice(language: target.speechLocale) != nil else {
+                        throw PipelineError.message("请在系统设置中安装译文语言的朗读声音。")
+                    }
+                    preparedKey = resourceKey
+                    state = .idle
+                    message = "本机语音资源已就绪，自定义服务将翻译识别文字。"
+                } catch {
+                    guard epoch.accepts(token), !Task.isCancelled else { return }
+                    state = .failed
+                    message = error.localizedDescription
+                }
+            }
+            return
+        }
         if forListening {
             // On a fresh launch our in-memory preparedKey is empty even when every
             // language asset is installed. Skip the download UI on this common path.
@@ -187,11 +211,11 @@ final class TranslationViewModel: ObservableObject {
             guard epoch.accepts(token) else { return }
             message = "准备语音识别资源…"
             guard requestedVariant.language == requestedSource else { throw PipelineError.message("请选择与源语言匹配的识别地区。") }
-            try await SpeechRecognizer.installAssets(for: requestedVariant)
+            try await modelLibrary.installSpeech(requestedVariant)
             try Task.checkCancellation()
             guard epoch.accepts(token) else { return }
             message = "准备翻译资源，请完成系统下载确认。"
-            try await session.prepareTranslation()
+            try await modelLibrary.prepareTranslation(session, from: requestedSource, to: requestedTarget)
             try Task.checkCancellation()
             guard epoch.accepts(token) else { return }
             guard AVSpeechSynthesisVoice(language: requestedTarget.speechLocale) != nil else {
@@ -255,6 +279,7 @@ final class TranslationViewModel: ObservableObject {
         let requestedLowLatency = lowLatencyEnabled
         let requestedTarget = target
         let requestedCapture = captureSource
+        let remote = modelPreferences.remote(for: .live)
         let requestedSide = outputSide
         state = .starting
         message = "正在连接麦克风。看到“已收音”后即可讲话。"
@@ -300,18 +325,19 @@ final class TranslationViewModel: ObservableObject {
                 self.state = .buffering
                 self.finishedMinutes = nil
                 self.message = "可以讲话了。开头语音已开始在内存中暂存，识别就绪后会从头处理。"
-                let status = await LanguageAvailability().status(from: Locale.Language(identifier: requestedSource.rawValue),
+                if remote == nil {
+                    let status = await LanguageAvailability().status(from: Locale.Language(identifier: requestedSource.rawValue),
                                                                 to: Locale.Language(identifier: requestedTarget.rawValue))
-                try Task.checkCancellation()
-                guard self.epoch.accepts(token) else { return }
-                guard status == .installed else {
-                    self.preparedKey = nil
-                    throw PipelineError.message("翻译语言资源未安装或已被系统移除，请重新准备资源。")
+                    try Task.checkCancellation()
+                    guard self.epoch.accepts(token) else { return }
+                    guard status == .installed else {
+                        self.preparedKey = nil
+                        throw PipelineError.message("翻译语言资源未安装或已被系统移除，请重新准备资源。")
+                    }
                 }
                 try Task.checkCancellation()
                 guard self.epoch.accepts(token) else { return }
-                self.translator = TranslationSession(installedSource: Locale.Language(identifier: requestedSource.rawValue),
-                                                     target: Locale.Language(identifier: requestedTarget.rawValue))
+                self.translator = try TextTranslationRoute(from: requestedSource, to: requestedTarget, connection: remote, use: .live)
                 try await self.speech.start(variant: requestedVariant, lowLatency: requestedLowLatency, onLocale: { [weak self] locale in
                     guard let self, self.epoch.accepts(token) else { return }
                     self.actualLocaleIdentifier = locale
@@ -626,7 +652,7 @@ final class TranslationViewModel: ObservableObject {
                         self.activeTranslationID = nil
                         continue
                     }
-                    let text = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let text = response.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !text.isEmpty else { throw PipelineError.message("翻译未返回内容，已暂停。") }
                     let now = ProcessInfo.processInfo.systemUptime
                     self.latestMetrics.translationSeconds = now - began

@@ -3,7 +3,7 @@ import Translation
 
 struct ContentView: View {
     @StateObject private var model = TranslationViewModel()
-    @StateObject private var meetingPreferences = MeetingModelPreferences()
+    @State private var showModels = false
     @State private var showSettings = false
     @State private var showOriginal = true
     @State private var largeCaptions = false
@@ -37,6 +37,7 @@ struct ContentView: View {
                 SettingsView(model: model, showOriginal: $showOriginal, largeCaptions: $largeCaptions,
                              highlightInformation: $highlightInformation)
             }
+            .navigationDestination(isPresented: $showModels) { ModelCenterDestination() }
             .sheet(isPresented: $showCatchUp, onDismiss: { model.stopReplay() }) {
                 CatchUpView(model: model, highlightInformation: highlightInformation,
                             requestReplay: { performReplay($0) })
@@ -70,7 +71,11 @@ struct ContentView: View {
                 }
                 Button("取消", role: .cancel) {}
             } message: {
-                Text("在设备端处理，录音不落盘。已定稿的文字可以导出为会议纪要。")
+                if let remote = model.modelPreferences.remote(for: .live) {
+                    Text("语音与声纹留在本机。用于翻译的识别文字（包括提前提交的分句）会发到 \(remote.baseURL)，使用 \(remote.model)。")
+                } else {
+                    Text("语音识别和翻译在本机进行。已定稿的文字可以导出为会议纪要。")
+                }
             }
             .confirmationDialog("跳到当前讲话？", isPresented: $askSkip, titleVisibility: .visible) {
                 Button("跳到当前") { model.skipToLive() }
@@ -80,8 +85,10 @@ struct ContentView: View {
             }
         }
         .tint(AudioTheme.accent)
-        .environmentObject(meetingPreferences)
+        .environmentObject(model.modelPreferences)
+        .environmentObject(model)
         .background { GroupTranslationPreparation(coordinator: model.dialogue) }
+        .background { LibraryTranslationPreparation(library: model.modelLibrary) }
         .translationTask(model.translationConfiguration) { session in
             await model.prepareResources(using: session)
         }
@@ -102,6 +109,9 @@ struct ContentView: View {
                 DialogueMark().frame(width: 34, height: 34)
                 Text(verbatim: "AirLive").font(.title2.weight(.bold))
                 Spacer()
+                Button { showModels = true } label: {
+                    Text("模型").font(.subheadline.weight(.semibold)).frame(minWidth: 44, minHeight: 44)
+                }.accessibilityLabel("模型中心")
                 Button { meetingSheet = model.readableMinutes } label: {
                     Image(systemName: "doc.text").frame(width: 44, height: 44)
                         .background(AudioTheme.surface, in: Circle())
@@ -292,7 +302,7 @@ struct ContentView: View {
                     } else if model.isRunning || model.isBusy {
                         startAfterPreparation = false
                         model.stop()
-                    } else if !model.awarenessConfirmed {
+                    } else if !model.awarenessConfirmed || model.modelPreferences.remote(for: .live) != nil {
                         askAwareness = true
                     } else { begin() }
                 } label: {
@@ -368,5 +378,13 @@ private struct GroupTranslationPreparation: View {
     var body: some View {
         Color.clear.allowsHitTesting(false)
             .translationTask(coordinator.configuration) { session in await coordinator.prepare(using: session) }
+    }
+}
+
+private struct LibraryTranslationPreparation: View {
+    @ObservedObject var library: ModelLibrary
+    var body: some View {
+        Color.clear.allowsHitTesting(false)
+            .translationTask(library.translationRequest) { session in await library.installRequestedPair(session) }
     }
 }

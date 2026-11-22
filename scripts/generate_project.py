@@ -92,7 +92,7 @@ def generate(bundle_id: str, team: str, build_number: str):
                     # Match SwiftPM's architecture for the selected simulator.
                     settings["ONLY_ACTIVE_ARCH[sdk=iphonesimulator*]"] = "YES"
             else:
-                settings = {"PRODUCT_NAME": "$(TARGET_NAME)", "CODE_SIGN_STYLE": "Automatic", "TARGETED_DEVICE_FAMILY": "1", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator", "SUPPORTS_MACCATALYST": "NO", "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD": "NO", "CURRENT_PROJECT_VERSION": build_number, "MARKETING_VERSION": "0.1.11", "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/Frameworks"]}
+                settings = {"PRODUCT_NAME": "$(TARGET_NAME)", "CODE_SIGN_STYLE": "Automatic", "TARGETED_DEVICE_FAMILY": "1", "SUPPORTED_PLATFORMS": "iphoneos iphonesimulator", "SUPPORTS_MACCATALYST": "NO", "SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD": "NO", "CURRENT_PROJECT_VERSION": build_number, "MARKETING_VERSION": "0.1.12", "LD_RUNPATH_SEARCH_PATHS": ["$(inherited)", "@executable_path/Frameworks"]}
                 if team:
                     settings["DEVELOPMENT_TEAM"] = team
                 if kind == "app":

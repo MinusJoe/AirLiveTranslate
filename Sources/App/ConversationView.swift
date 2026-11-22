@@ -12,6 +12,7 @@ struct ConversationView: View {
     @State private var confirmDelete = false
     @State private var notes: MeetingMinutes?
     @State private var summary: MeetingSummaryResult?
+    @State private var showingCounter = false
 
     init(model: TranslationViewModel) {
         listener = model
@@ -26,6 +27,9 @@ struct ConversationView: View {
                     DialogueEntryEditor(editor: editor, busy: reply.phase != .idle, message: reply.message,
                                         submit: { coordinator.submitEditor(editor.id, text: $0) },
                                         cancel: { coordinator.cancelEditor(editor.id) }).id(editor.id)
+                } else if showingCounter && !coordinator.realtimeBusy {
+                    CounterDisplayView(coordinator: coordinator, returnToList: { showingCounter = false },
+                                       toggleCapture: toggleCapture)
                 } else {
                     VStack(spacing: 4) {
                         HStack {
@@ -64,11 +68,18 @@ struct ConversationView: View {
                 }
             }
             .navigationTitle("面对面对话").navigationBarTitleDisplayMode(.inline)
+            .toolbar(showingCounter && !coordinator.realtimeBusy ? .hidden : .visible, for: .navigationBar)
             .toolbar {
                 if coordinator.editor == nil {
                     ToolbarItem(placement: .topBarLeading) {
                         Button { notes = coordinator.minutes } label: { Image(systemName: "doc.text") }
                             .accessibilityLabel("对话记录与导出")
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button { showingCounter = true } label: {
+                            Label("柜台展示", systemImage: "rectangle.split.1x2")
+                        }.labelStyle(.titleAndIcon).disabled(coordinator.realtimeBusy)
+                        .accessibilityLabel("柜台双向展示").accessibilityHint("手机平放，对面读外语，你读中文。")
                     }
                     ToolbarItem(placement: .confirmationAction) { Button("返回") { dismiss() } }
                 }
@@ -84,6 +95,9 @@ struct ConversationView: View {
             Button("已告知在场人员，开始") { coordinator.start() }
         } message: {
             Text("请先告知所有参与者。首次需联网下载本机语音和声纹模型。返回其他页面后仍会收音，直到点「结束对话」。新对话会替换上次对话记录。")
+            if let remote = listener.modelPreferences.remote(for: .dialogue) {
+                Text("识别出的待译文字会发送到 \(remote.baseURL)，使用 \(remote.model)。录音与声纹留在本机。")
+            }
         }
         .confirmationDialog("登记我的声音", isPresented: $confirmEnroll, titleVisibility: .visible) {
             Button("开始采样") { coordinator.start(enrollment: true, additional: additionalSample) }
@@ -114,13 +128,13 @@ struct ConversationView: View {
                     ForEach(coordinator.entries) { entry in
                         VStack(alignment: .leading, spacing: 7) {
                             HStack {
-                                Text(entry.participantLabel ?? (entry.speaker == .me ? "我" : "对方"))
+                                DialogueSpeakerLabel(entry: entry, coordinator: coordinator)
                                 if entry.kind == .typed { Text("手动填写") }
                                 if case .correction = entry.kind { Text("更正回复") }
                                 if entry.supersededBy != nil { Text("已更正") }
                                 if entry.correctionLanguage != nil {
                                     Button("更正") { coordinator.beginCorrection(of: entry.id) }
-                                        .disabled(!coordinator.canAct)
+                                        .disabled(!coordinator.canAct || coordinator.pendingSpeakers[entry.id] != nil)
                                 }
                             }.font(AudioTheme.meta).foregroundStyle(AudioTheme.secondary)
                             HStack(alignment: .top, spacing: 8) {
@@ -167,7 +181,7 @@ struct ConversationView: View {
         }
         .buttonStyle(.plain).foregroundStyle(AudioTheme.accent)
         .accessibilityLabel(label)
-        .disabled(!coordinator.canAct)
+        .disabled(!coordinator.canAct || coordinator.pendingSpeakers[entry.id] != nil)
     }
 
     /// The primary listener remains the only audio owner; this is a read-only mirror.
@@ -209,20 +223,27 @@ struct ConversationView: View {
                 if !coordinator.message.isEmpty {
                     Text(coordinator.message).font(.footnote).foregroundStyle(AudioTheme.secondary)
                 }
+                if coordinator.phase == .preparing {
+                    NavigationLink("查看模型准备进度") { ModelCenterDestination() }
+                }
                 if coordinator.phase == .idle && coordinator.entries.isEmpty {
                     Text("请先告知在场人员。首次需联网下载本机模型；切换页面会继续收音，点「结束对话」停止。")
                         .font(.caption).foregroundStyle(AudioTheme.secondary)
                 }
-                Button {
-                    if coordinator.phase == .idle {
-                        if coordinator.entries.isEmpty { coordinator.start() } else { confirmStart = true }
-                    } else { coordinator.end() }
-                } label: {
+                Button(action: toggleCapture) {
                     AudioActionLabel(title: coordinator.phase == .idle ? "开始连续对话" :
                                         (coordinator.phase == .capturing ? "结束对话" : "取消"),
                                      symbol: coordinator.phase == .idle ? "mic.fill" : "stop.fill")
                 }.buttonStyle(.plain)
             }
         }.padding(.horizontal, 20).padding(.vertical, 8).background(AudioTheme.canvas)
+    }
+
+    private func toggleCapture() {
+        if coordinator.phase == .idle {
+            if coordinator.entries.isEmpty && !showingCounter && listener.modelPreferences.remote(for: .dialogue) == nil {
+                coordinator.start()
+            } else { confirmStart = true }
+        } else { coordinator.end() }
     }
 }

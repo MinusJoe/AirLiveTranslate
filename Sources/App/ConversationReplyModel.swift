@@ -13,11 +13,11 @@ final class ConversationReplyModel: ObservableObject {
     private let audio = AudioController()
     private var work: Task<Void, Never>?
     private var generation = UUID()
-    private var translator: TranslationSession?
+    private var translator: TextTranslationRoute?
     private var speakingRate: Float = 0.5
     private var onStopped: (@MainActor () -> Void)?
     private var onPlayed: (@MainActor () -> Void)?
-    func speakCorrection(_ text: String, language: AppLanguage, rate: Float,
+    func speakCorrection(_ text: String, language: AppLanguage, rate: Float, connection: MeetingConnection? = nil,
                          onStopped: @escaping @MainActor () -> Void, onPlayed: @escaping @MainActor () -> Void) {
         guard phase == .idle, language != .chinese else { onStopped(); return }
         cancel()
@@ -31,24 +31,23 @@ final class ConversationReplyModel: ObservableObject {
         phase = .translating
         message = "正在翻译更正内容…"
         work = Task {
-            do { try await translateAndPlayCorrection(text, token: token) }
+            do { try await translateAndPlayCorrection(text, token: token, connection: connection) }
             catch { stop(with: error.localizedDescription, token: token) }
         }
     }
 
-    private func translateAndPlayCorrection(_ text: String, token: UUID) async throws {
+    private func translateAndPlayCorrection(_ text: String, token: UUID, connection: MeetingConnection?) async throws {
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
         original = text
         phase = .translating
         message = "正在翻译更正内容…"
-        let session = TranslationSession(installedSource: Locale.Language(identifier: AppLanguage.chinese.rawValue),
-                                         target: Locale.Language(identifier: language.rawValue))
+        let session = try TextTranslationRoute(from: .chinese, to: language, connection: connection, use: .dialogue)
         translator = session
         let response = try await session.translate(text)
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
-        let result = response.targetText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let result = response.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !result.isEmpty else { throw PipelineError.message("没有返回译文，请再试一次。") }
         translated = result
         let introduction = language == .japanese ? "すみません、訂正します。" : "Sorry, let me correct that. "
@@ -57,6 +56,7 @@ final class ConversationReplyModel: ObservableObject {
 
     func speakPrompt(original: String, translated: String, language: AppLanguage,
                      rate: Float, onStopped: @escaping @MainActor () -> Void = {},
+                     onFirstAudio: (@MainActor () -> Void)? = nil,
                      onPlayed: @escaping @MainActor () -> Void) {
         guard phase == .idle, language != .chinese, !translated.isEmpty else { onStopped(); return }
         cancel()
@@ -69,12 +69,13 @@ final class ConversationReplyModel: ObservableObject {
         self.onPlayed = onPlayed
         phase = .playing
         work = Task {
-            do { try await playOutLoud(translated, token: token) }
+            do { try await playOutLoud(translated, token: token, onFirstAudio: onFirstAudio) }
             catch { stop(with: error.localizedDescription, token: token) }
         }
     }
 
-    private func playOutLoud(_ text: String, introduction: String = "", token: UUID) async throws {
+    private func playOutLoud(_ text: String, introduction: String = "", token: UUID,
+                             onFirstAudio: (@MainActor () -> Void)? = nil) async throws {
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }
         guard text.count <= ReplayPolicy.maximumCaptionCharacters else {
@@ -90,7 +91,7 @@ final class ConversationReplyModel: ObservableObject {
         for part in parts {
             try Task.checkCancellation()
             guard generation == token else { throw CancellationError() }
-            try await audio.speak(part, language: language, rate: speakingRate)
+            try await audio.speak(part, language: language, rate: speakingRate, onFirstBufferScheduled: onFirstAudio)
         }
         try Task.checkCancellation()
         guard generation == token else { throw CancellationError() }

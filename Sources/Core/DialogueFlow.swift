@@ -35,15 +35,27 @@ struct DialogueEntry: Identifiable, Equatable {
     }
     let id: UUID
     let original: String
-    let translated: String
+    var translated: String
     var isProvisional = false
     var kind: Kind = .heard
     var supersededBy: UUID?
     var party: VoiceParty?
     var sourceLanguage: AppLanguage?
     var translatedLanguage: AppLanguage?
+    var partnerLanguage: AppLanguage?
     var overlapping = false
-    var participantLabel: String? { overlapping ? "多人发言 · 待确认" : party?.label }
+    var manuallyAssigned = false
+    var audioStarted = false
+    var participantLabel: String? { overlapping && !manuallyAssigned ? "多人发言 · 待确认" : party?.label }
+
+    var canAssignSpeaker: Bool { party != nil && partnerLanguage != nil && supersededBy == nil && !isProvisional }
+    var counterPartner: AppLanguage? {
+        if let partnerLanguage { return partnerLanguage }
+        switch kind {
+        case .reply(let lang), .correction(let lang, _): return lang
+        default: return [sourceLanguage, translatedLanguage].compactMap { $0 }.first { $0 != .chinese }
+        }
+    }
 
     var speaker: Speaker {
         if party == .wearer || party == .chineseSide { return .me }
@@ -60,6 +72,12 @@ struct DialogueEntry: Identifiable, Equatable {
             return sourceLanguage == nil || sourceLanguage == .chinese ? language : nil
         default: return nil
         }
+    }
+
+    func mayAutoPlayAfterAssignment(on device: DialogueDevice) -> Bool {
+        guard manuallyAssigned, !audioStarted, !overlapping, let party, case .guest = party,
+              let sourceLanguage, let partnerLanguage else { return false }
+        return device == .headphones && sourceLanguage == partnerLanguage && translatedLanguage == .chinese
     }
 
     func playback(in device: DialogueDevice) -> DialoguePlayback? {
@@ -116,23 +134,24 @@ struct DialogueTranscript {
     }
 
     mutating func addReply(original: String, translated: String, kind: DialogueEntry.Kind, language: AppLanguage? = nil) {
-        entries.append(DialogueEntry(id: UUID(), original: original, translated: translated, kind: kind, translatedLanguage: language))
+        entries.append(DialogueEntry(id: UUID(), original: original, translated: translated, kind: kind,
+                                     sourceLanguage: .chinese, translatedLanguage: language, partnerLanguage: language))
         trim()
     }
 
     mutating func addSpoken(_ line: GroupUtterance, translation: String, party: VoiceParty,
-                            direction: GroupDirection?) {
+                            direction: GroupDirection?, partner: AppLanguage) {
         let kind: DialogueEntry.Kind = direction.flatMap { $0.isOutgoingReply ? .reply($0.target) : nil } ?? .heard
         entries.append(DialogueEntry(id: UUID(), original: line.text, translated: translation,
                                      kind: kind, party: party, sourceLanguage: line.source,
-                                     translatedLanguage: direction?.target, overlapping: line.mixed))
+                                     translatedLanguage: direction?.target, partnerLanguage: partner, overlapping: line.mixed))
         trim()
     }
 
     mutating func addPartnerInput(_ text: String, editor: DialogueEditor) -> Bool {
         guard case .partnerInput = editor.purpose, editor.accepts(text),
               !entries.contains(where: { $0.id == editor.id }) else { return false }
-        entries.append(DialogueEntry(id: editor.id, original: text, translated: "", kind: .typed))
+        entries.append(DialogueEntry(id: editor.id, original: text, translated: "", kind: .typed, partnerLanguage: editor.language))
         trim()
         return true
     }
@@ -148,11 +167,34 @@ struct DialogueTranscript {
               let editor = editorForCorrection(of: id), editor.accepts(original),
               !translated.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let row = DialogueEntry(id: UUID(), original: original, translated: translated,
-                                kind: .correction(editor.language, replaces: id))
+                                kind: .correction(editor.language, replaces: id), sourceLanguage: .chinese,
+                                translatedLanguage: editor.language, partnerLanguage: editor.language, audioStarted: true)
         entries[index].supersededBy = row.id
         entries.append(row)
         trim()
         return true
+    }
+
+    @discardableResult mutating func markAudioStarted(_ id: UUID) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == id }), !entries[index].audioStarted else { return false }
+        entries[index].audioStarted = true
+        return true
+    }
+
+    /// Reassign one utterance in place; never update other entries or the voice gallery.
+    mutating func reassign(_ id: UUID, to party: VoiceParty, source: AppLanguage, translation: String) -> DialogueEntry? {
+        guard VoiceParty.assignable.contains(party), !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let index = entries.firstIndex(where: { $0.id == id }), entries[index].canAssignSpeaker,
+              let partner = entries[index].partnerLanguage,
+              entries[index].sourceLanguage.map({ $0 == source }) ?? (source == .chinese || source == partner) else { return nil }
+        let target: AppLanguage = party == .wearer ? partner : .chinese
+        entries[index].party = party
+        entries[index].kind = party == .wearer ? .reply(partner) : .heard
+        entries[index].sourceLanguage = source
+        entries[index].translatedLanguage = target
+        entries[index].translated = translation
+        entries[index].manuallyAssigned = true
+        return entries[index]
     }
 
     private mutating func trim() {

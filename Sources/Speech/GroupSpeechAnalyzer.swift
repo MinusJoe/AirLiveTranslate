@@ -7,10 +7,10 @@ actor GroupSpeechAnalyzer {
     private var asr: SenseVoiceManager?
     private var speakerModels: DiarizerModels?
 
-    func prepare(enrollment: Bool) async throws {
-        if speakerModels == nil { speakerModels = try await DiarizerModels.downloadIfNeeded() }
+    func prepare(enrollment: Bool, library: ModelLibrary) async throws {
+        if speakerModels == nil { speakerModels = try await library.loadSpeakers() }
         try Task.checkCancellation()
-        if !enrollment, asr == nil { asr = try await SenseVoiceManager.load() }
+        if !enrollment, asr == nil { asr = try await library.loadMultilingual() }
         try Task.checkCancellation()
     }
 

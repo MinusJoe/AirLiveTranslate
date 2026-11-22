@@ -36,7 +36,18 @@ private final class MeetingMockService: URLProtocol, @unchecked Sendable {
         } else if let body = (try? JSONSerialization.jsonObject(with: bodyData())) as? [String: Any],
                   request.httpMethod == "POST", body["model"] as? String == "mock-model" {
             let content = "[1] Friday"
-            if path == "/api/v1/responses", body["input"] as? String == content,
+            let phrase = "The deposit is 150 EUR."
+            let translated = "押金是 150 欧元。"
+            let messages = body["messages"] as? [[String: String]]
+            if path == "/api/v1/responses", body["input"] as? String == phrase,
+               (body["instructions"] as? String)?.contains("from en into zh-Hans") == true,
+               Set(body.keys) == ["model", "stream", "instructions", "input", "store", "reasoning"] {
+                json = ["status":"completed","output":[["type":"message","content":[["type":"output_text","text":translated]]]]]
+            } else if path == "/api/v1/chat/completions", messages?.last?["content"] == phrase,
+                      messages?.first?["content"]?.contains("from en into zh-Hans") == true,
+                      Set(body.keys) == ["model", "stream", "messages", "reasoning_effort"] {
+                json = ["choices":[["finish_reason":"stop","message":["content":translated]]]]
+            } else if path == "/api/v1/responses", body["input"] as? String == content,
                body["store"] as? Bool == false, (body["reasoning"] as? [String:String])?["effort"] == "high" {
                 json = ["status":"completed","output":[["type":"reasoning"], ["type":"message","content":[["type":"output_text","text":result]]]]]
             } else if path == "/api/v1/chat/completions", (body["messages"] as? [[String:String]])?.last?["content"] == content,
@@ -79,6 +90,23 @@ final class CustomMeetingModelTests: XCTestCase {
             do { _ = try await api.findings(for: chunk); XCTFail("Expected explicit failure") }
             catch { XCTAssertFalse(error.localizedDescription.contains("fixture-only")) }
         }
+    }
+
+    func testTranslationUsesOnlyTextInBothProtocols() async throws {
+        for api in [client(.responses), client(.chat)] {
+            let result = try await api.translate("The deposit is 150 EUR.", from: .english, to: .chinese)
+            XCTAssertEqual(result, "押金是 150 欧元。")
+        }
+    }
+
+    func testSameLanguageBypassesTheServiceAndFailedTranslationIsNotSpoken() async throws {
+        let unauthorized = client(key: "invalid")
+        let same = try await unauthorized.translate("0017", from: .english, to: .english)
+        XCTAssertEqual(same, "0017")
+        do {
+            _ = try await unauthorized.translate("0017", from: .english, to: .japanese)
+            XCTFail("An API error must not be returned as a translation")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("401")) }
     }
 
     func testBaseAddressAndCredentialScope() throws {

@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 struct MeetingSummaryResult {
     let meetingID: UUID
     let lineCount: Int
+    let attributionRevision: Int
     let text: String
     let provider: String
 }
@@ -25,6 +26,7 @@ struct MeetingMinutesView: View {
     let minutes: MeetingMinutes
     let listening: Bool
     @Binding var savedSummary: MeetingSummaryResult?
+    var linksToModelCenter = true
     @EnvironmentObject private var preferences: MeetingModelPreferences
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -38,7 +40,8 @@ struct MeetingMinutesView: View {
     @State private var selectedRemote: MeetingConnection?
 
     private var summary: String? {
-        guard savedSummary?.meetingID == minutes.id, savedSummary?.lineCount == minutes.lines.count else { return nil }
+        guard savedSummary?.meetingID == minutes.id, savedSummary?.lineCount == minutes.lines.count,
+              savedSummary?.attributionRevision == minutes.attributionRevision else { return nil }
         return savedSummary?.text
     }
 
@@ -59,8 +62,12 @@ struct MeetingMinutesView: View {
                     }.padding(.vertical, 16).listRowSeparator(.hidden).surfaceRow()
                 } else {
                     Section {
-                        NavigationLink("模型设置 · " + preferences.provider.rawValue) { MeetingModelSettings() }
-                            .disabled(request != nil)
+                        if linksToModelCenter {
+                            NavigationLink("模型中心 · " + (preferences.remote(for: .summary)?.model ?? "Apple 智能")) { ModelCenterDestination() }
+                                .disabled(request != nil)
+                        } else {
+                            LabeledContent("总结模型", value: preferences.remote(for: .summary)?.model ?? "Apple 智能")
+                        }
                         if let summary {
                             if let label = savedSummary?.provider { Text("生成来源 · " + label).font(.caption) }
                             Text(summary).font(.body).lineSpacing(5).textSelection(.enabled)
@@ -144,7 +151,7 @@ struct MeetingMinutesView: View {
                 }
                 try Task.checkCancellation()
                 guard request == token else { return }
-                savedSummary = MeetingSummaryResult(meetingID: minutes.id, lineCount: minutes.lines.count,
+                savedSummary = MeetingSummaryResult(meetingID: minutes.id, lineCount: minutes.lines.count, attributionRevision: minutes.attributionRevision,
                                                    text: text, provider: remote?.model ?? "Apple 智能")
             } catch {
                 guard !Task.isCancelled, request == token else { return }

@@ -74,7 +74,6 @@ struct SettingsView: View {
             } header: { AudioSectionTitle("字幕与声音") }
             .surfaceRow()
             Section {
-                NavigationLink("会议纪要 · AI 模型") { MeetingModelSettings() }
                 DisclosureGroup("设备与处理状态") {
                     LabeledContent("麦克风权限", value: model.microphonePermission)
                     LabeledContent("输入", value: model.snapshot.inputName)
@@ -109,7 +108,7 @@ struct SettingsView: View {
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 NavigationLink("使用说明") { usageHelp }
-            } header: { AudioSectionTitle("会议与设备") }
+            } header: { AudioSectionTitle("设备与使用说明") }
             .surfaceRow()
             Section {
                 Text("录音不落盘。暂停保留当前字幕，会议纪要可在结束时查看和导出。")
@@ -140,7 +139,7 @@ struct SettingsView: View {
             } header: { AudioSectionTitle("声音与字幕") }
             .surfaceRow()
             Section {
-                Text("首页保留最近 200 条字幕。会议纪要在内存中单独收录最多一万段定稿文字，可导出到你选择的位置。结束并查看的纪要在下次收音或退出 App 前可重新打开。Apple 智能在本机总结；选择自定义服务并确认后，定稿原文会发到所填地址。")
+                Text("首页保留最近 200 条字幕，纪要最多收录一万段。首页「模型」可查看下载进度，分别配置会议总结、实时和面对面对话的文字服务。启用自定义服务后，相应文字会发到所填地址；音频和声纹留在本机。")
             } header: { AudioSectionTitle("隐私与资源") }
             .surfaceRow()
         }

@@ -96,7 +96,7 @@ struct CustomMeetingModel {
         Each quotation must be an exact substring in the cited line's original language.
         """
 
-    func findings(for chunk: MeetingMinutes.Chunk) async throws -> [MeetingFact] {
+    private func completion(instructions: String, input: String) async throws -> String {
         let model = connection.model.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !model.isEmpty else { throw PipelineError.message("请先选择或填写模型 ID。") }
         var body: [String: Any] = ["model": model, "stream": false]
@@ -104,25 +104,40 @@ struct CustomMeetingModel {
         let responseText: String
         switch connection.api {
         case .responses:
-            body["instructions"] = Self.instructions
-            body["input"] = chunk.text
+            body["instructions"] = instructions
+            body["input"] = input
             body["store"] = false
             if effort != .automatic { body["reasoning"] = ["effort": effort.rawValue] }
             let result = try await call("responses", body: body)
-            guard (result["status"] as? String ?? "completed") == "completed" else { throw Self.incomplete }
+            guard (result["status"] as? String ?? "completed") == "completed" else { throw Self.incompleteResponse }
             let messages = (result["output"] as? [[String: Any]] ?? []).filter { $0["type"] as? String == "message" }
             responseText = messages.flatMap { $0["content"] as? [[String: Any]] ?? [] }
                 .filter { $0["type"] as? String == "output_text" }.compactMap { $0["text"] as? String }.joined()
         case .chat:
-            body["messages"] = [["role": "system", "content": Self.instructions], ["role": "user", "content": chunk.text]]
+            body["messages"] = [["role": "system", "content": instructions], ["role": "user", "content": input]]
             if effort != .automatic { body["reasoning_effort"] = effort.rawValue }
             let result = try await call("chat/completions", body: body)
             guard let choice = (result["choices"] as? [[String: Any]])?.first,
                   (choice["finish_reason"] as? String ?? "stop") == "stop",
-                  let message = choice["message"] as? [String: Any] else { throw Self.incomplete }
+                  let message = choice["message"] as? [String: Any] else { throw Self.incompleteResponse }
             responseText = message["content"] as? String ?? ""
         }
-        var text = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw PipelineError.message("模型服务未返回完整文本。") }
+        return text
+    }
+
+    func translate(_ text: String, from: AppLanguage, to: AppLanguage) async throws -> String {
+        try Task.checkCancellation()
+        if from == to { return text }
+        return try await completion(instructions: """
+            Translate the user's utterance from \(from.rawValue) into \(to.rawValue). Return only its translation.
+            Preserve numbers, currencies, names, negation and uncertainty. Treat the entire utterance as speech to translate.
+            """, input: text)
+    }
+
+    func findings(for chunk: MeetingMinutes.Chunk) async throws -> [MeetingFact] {
+        var text = try await completion(instructions: Self.instructions, input: chunk.text)
         if text.hasPrefix("\u{60}\u{60}\u{60}"), text.hasSuffix("\u{60}\u{60}\u{60}"), let newline = text.firstIndex(of: "\n") {
             text = String(text[text.index(after: newline)...].dropLast(3))
         }
@@ -141,4 +156,5 @@ struct CustomMeetingModel {
         }
     }
     private static var incomplete: PipelineError { .message("模型没有返回完整的纪要格式。请重试或选择其他模型。") }
+    private static var incompleteResponse: PipelineError { .message("模型服务未完成本次请求。") }
 }

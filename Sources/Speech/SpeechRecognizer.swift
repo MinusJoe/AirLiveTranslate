@@ -9,6 +9,7 @@ final class SpeechRecognizer {
     private var generation = UUID()
 
     static func availableVariants(for language: AppLanguage) async -> [SpeechVariant] {
+        guard SpeechTranscriber.isAvailable else { return [] }
         let locales = await SpeechTranscriber.supportedLocales
         return SpeechVariant.supported(for: language, identifiers: locales.map(\.identifier))
     }
@@ -26,13 +27,19 @@ final class SpeechRecognizer {
         return locale
     }
 
-    static func installAssets(for variant: SpeechVariant) async throws {
+    static func installAssets(for variant: SpeechVariant,
+                              progress: @escaping @MainActor (Double?) -> Void = { _ in }) async throws {
         guard SpeechTranscriber.isAvailable else {
             throw PipelineError.message("这台设备不支持本地 SpeechTranscriber，无法启动此版本的听译。")
         }
         let locale = try await exactLocale(for: variant)
         let transcriber = SpeechTranscriber(locale: locale, preset: .timeIndexedProgressiveTranscription)
         if let request = try await AssetInventory.assetInstallationRequest(supporting: [transcriber]) {
+            let observer = request.progress.observe(\.fractionCompleted, options: [.initial, .new]) { value, _ in
+                let fraction = value.totalUnitCount > 0 ? value.fractionCompleted : nil
+                Task { @MainActor in progress(fraction) }
+            }
+            defer { observer.invalidate() }
             try await request.downloadAndInstall()
         }
         try Task.checkCancellation()

@@ -21,6 +21,8 @@ enum VoiceParty: Equatable, Sendable {
         case .unidentified: return "说话人待确认"
         }
     }
+
+    static let assignable: [VoiceParty] = [.wearer] + (0..<8).map { .guest($0) }
 }
 
 struct VoiceGallery {
